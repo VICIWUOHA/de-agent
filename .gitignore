@@ -1,0 +1,10 @@
+.env
+
+# n8n local data
+data/
+tmp/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
