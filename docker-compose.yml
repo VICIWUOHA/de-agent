@@ -1,0 +1,134 @@
+services:
+
+  # -- ClickHouse (local dev) -------------------------------------------------
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    restart: unless-stopped
+    ports:
+      - "8123:8123"   # HTTP interface
+      - "9000:9000"   # native protocol
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    environment:
+      - CLICKHOUSE_USER=${CLICKHOUSE_USER}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD}
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - de-agent
+
+  # -- n8n --------------------------------------------------------------------
+  n8n:
+    image: docker.n8n.io/n8nio/n8n
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    environment:
+      # Webhook URL - set to your ngrok static domain (or Cloud Run URL in prod)
+      - WEBHOOK_URL=${WEBHOOK_URL}
+      - N8N_HOST=0.0.0.0
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=https
+
+      # Auth
+      - N8N_BASIC_AUTH_ACTIVE=true
+      - N8N_BASIC_AUTH_USER=${N8N_USER}
+      - N8N_BASIC_AUTH_PASSWORD=${N8N_PASSWORD}
+
+      # Timezone
+      - GENERIC_TIMEZONE=${TIMEZONE:-UTC}
+      - TZ=${TIMEZONE:-UTC}
+
+      # Encryption key - set a random string, keep it secret
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
+
+      # Required for code nodes (n8n 1.x+)
+      - N8N_RUNNERS_ENABLED=true
+      - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true
+
+      # ClickHouse connection (used by the HTTP Request node)
+      - CLICKHOUSE_HOST=${CLICKHOUSE_HOST}
+      - CLICKHOUSE_PORT=${CLICKHOUSE_PORT:-8123}
+      - CLICKHOUSE_USER=${CLICKHOUSE_USER}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD}
+      - CLICKHOUSE_DB=${CLICKHOUSE_DB:-default}
+      - CLICKHOUSE_SECURE=${CLICKHOUSE_SECURE:-false}
+      - CLICKHOUSE_VERIFY=${CLICKHOUSE_VERIFY:-false}
+
+      # ClickHouse MCP server URL - /mcp (HTTP Streamable); SSE deprecated Mar 2025
+      - CLICKHOUSE_MCP_URL=${CLICKHOUSE_MCP_URL:-http://mcp:8000/mcp}
+
+      # Slack bot token (used by HTTP: Open Edit Modal)
+      - SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN}
+
+      # Diagnostics
+      - N8N_DIAGNOSTICS_ENABLED=${N8N_DIAGNOSTICS_ENABLED:-false}
+
+      # Allow nodes to read env vars (needed for ClickHouse HTTP node)
+      - N8N_BLOCK_ENV_ACCESS_IN_NODE=${N8N_BLOCK_ENV_ACCESS_IN_NODE:-false}
+
+    volumes:
+      - n8n_data:/home/node/.n8n
+    depends_on:
+      - mcp
+      - clickhouse
+    networks:
+      - de-agent
+
+  # -- ClickHouse MCP server --------------------------------------------------
+  mcp:
+    build:
+      context: ./mcp
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      - CLICKHOUSE_HOST=${CLICKHOUSE_HOST:-clickhouse}
+      - CLICKHOUSE_PORT=${CLICKHOUSE_PORT:-8123}
+      - CLICKHOUSE_USER=${CLICKHOUSE_USER}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD}
+      - CLICKHOUSE_SECURE=${CLICKHOUSE_SECURE:-false}
+      - CLICKHOUSE_VERIFY=${CLICKHOUSE_VERIFY:-false}
+      - CLICKHOUSE_MCP_SERVER_TRANSPORT=http
+      - CLICKHOUSE_MCP_BIND_HOST=0.0.0.0
+      - CLICKHOUSE_MCP_BIND_PORT=8000
+      - CLICKHOUSE_MCP_AUTH_DISABLED=true
+    ports:
+      - "8000:8000"   # exposed for local debugging; not needed in prod
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    networks:
+      - de-agent
+
+  # -- ngrok tunnel -----------------------------------------------------------
+  # Exposes n8n to the public internet so Slack webhooks can reach it.
+  # Uses your ngrok static domain so the URL never changes between restarts.
+  # Dashboard: https://dashboard.ngrok.com/cloud-edge/domains
+  ngrok:
+    image: ngrok/ngrok:latest
+    restart: unless-stopped
+    command: >
+      http n8n:5678
+      --domain=${NGROK_STATIC_DOMAIN}
+      --log=stdout
+    environment:
+      - NGROK_AUTHTOKEN=${NGROK_AUTHTOKEN}
+    depends_on:
+      - n8n
+    networks:
+      - de-agent
+
+volumes:
+  n8n_data:
+  clickhouse_data:
+
+networks:
+  de-agent:
+    driver: bridge
