@@ -82,7 +82,7 @@ As a Senior Data Engineer, with over 7 years of experience in the data space, I 
 
 ---
 
-## Customisation
+## Customization
 
 - **AI model** - all three AI nodes (classifier, ad-hoc query agent, pipeline planning agent) use Claude via the Anthropic credential in n8n. Swapping to OpenAI (GPT-4o, GPT-4.1, etc.) requires only changing the language model sub-node on each agent - the rest of the workflow is model-agnostic.
 - **Data warehouse** - ClickHouse is the default, but the query execution step is a plain HTTP Request node. Any warehouse that exposes an HTTP API (BigQuery, Snowflake, Redshift, DuckDB, etc.) can be substituted by updating the `ClickHouse: Execute Query` node URL, headers, and auth to match your target system. The MCP server would also need to be replaced with one that introspects your chosen warehouse's schema.
