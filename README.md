@@ -1,4 +1,4 @@
-# DE Agent - n8n + ClickHouse + Slack
+# Data Engineering Agent - n8n + ClickHouse + Slack + (Jira)
 
 > Built by **[Victor Iwuoha](https://www.linkedin.com/in/viciwuoha)** - Senior Data Engineer.
 
