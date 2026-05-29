@@ -121,7 +121,7 @@ NGROK_STATIC_DOMAIN=your-name-abc123.ngrok-free.app
 WEBHOOK_URL=https://your-name-abc123.ngrok-free.app
 ```
 
-> **Note**: Upgrade to the ngrok Hobby plan (~$8/month) before going live. The free tier request quota is exhausted quickly by Slack's webhook retry behaviour.
+> **Note**: Upgrade to the ngrok Hobby plan (~$10/month) before going live. The free tier request quota is exhausted quickly by Slack's webhook retry behaviour.
 
 ### 3. Start the stack
 
