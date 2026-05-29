@@ -1,0 +1,73 @@
+{
+  "name": "Error-Alert-Workflow",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "6a034d02-1dba-4920-8a6e-7e72830b1bd3",
+      "name": "Error Trigger",
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "YOUR_PIPELINE_UPDATES_CHANNEL_ID",
+          "mode": "list",
+          "cachedResultName": "pipeline-updates"
+        },
+        "text": "=:rotating_light: *FAILED n8n WORKFLOW ALERT*\n\n*Workflow Details*\n• *ID:* `{{ $json.workflow.id }}`\n• *Name:* `{{ $json.workflow.name }}`\n\n*Execution ID:* `{{ $json.execution.id }}`\n\n---------------------------\n\n*Error Details*\n• *Last node executed:* `{{ $json.execution.lastNodeExecuted }}`\n• *Error message:* {{ $json.execution.error.message }}\n• :alarm_clock: *Failed at:* {{ $now }}\n\n<{{ $json.execution.url }}|View Execution & Logs>\n\n*Error Stack*\n```{{ $json.execution.error.stack }}```\n",
+        "otherOptions": {}
+      },
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.4,
+      "position": [
+        304,
+        0
+      ],
+      "id": "5d54bb36-5c0d-43dd-a966-1ced4f283662",
+      "name": "Post Error Message to Slack",
+      "webhookId": "9ac65dc3-ea10-4065-90af-6a1d49fbc95a",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "slackApi": {
+          "id": "YOUR_SLACK_CREDENTIAL_ID",
+          "name": "Slack Personal"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Post Error Message to Slack",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "45b504ed-203b-4a02-843c-32c9156c01fa",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "YOUR_N8N_INSTANCE_ID"
+  },
+  "id": "mPlfFhzv4GaVxSbN",
+  "tags": []
+}
