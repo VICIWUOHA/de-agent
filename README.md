@@ -69,11 +69,11 @@ As a Senior Data Engineer, with over 7 years of experience in the data space, I 
 1. A message in `#data-requests` triggers the workflow
 2. **Claude Sonnet 4.6** classifies it as `AD_HOC_QUERY`, `PIPELINE_REQUEST`, or `NOT_RELEVANT`
 3. **Ad-hoc path**: **Claude Sonnet 4.5** introspects ClickHouse schema via MCP tools (`list_databases`, `list_tables`, `run_select_query`), writes SQL, and posts a plan to `#de-ops` with three interactive buttons:
-   - **✅ Approve** - runs the AI-proposed SQL as-is
-   - **✏️ Edit SQL** - opens a Slack modal to modify the SQL before running
-   - **❌ Decline** - defers the request (Jira backlog node included, disabled by default)
+   - **✅ Approve** - runs the AI-proposed SQL as-is, results posted back to `#de-ops`
+   - **✏️ Edit SQL** - opens a Slack modal to modify the SQL before running, results posted back to `#de-ops`
+   - **❌ Decline** - posts a declined notice to `#de-ops` and creates a Jira backlog ticket so nothing is lost (Jira node disabled by default)
 4. On approval, ClickHouse executes the query and results are posted to `#de-ops`
-5. **Pipeline path**: **Claude Sonnet 4.5** plans a handoff (dbt model / Airflow DAG / Jasper report) and posts it to `#de-ops` for the team to pick up. A Jira ticket node is included but disabled by default.
+5. **Pipeline path**: **Claude Sonnet 4.5** plans a handoff (dbt model / Airflow DAG / Jasper report), posts it to `#de-ops`, and creates a Jira ticket for the team to pick up (Jira node disabled by default).
 6. **Failure alerting**: A separate `Error-Alert-Workflow` is configured as an [n8n error workflow](https://docs.n8n.io/flow-logic/error-handling/). If any node in the main workflow fails, n8n triggers this workflow automatically and posts a structured alert to `#pipeline-updates` with the workflow name, execution ID, last node executed, error message, stack trace, and a direct link to the failed execution in n8n. To wire it up: open the main workflow settings → **Error Workflow** → select `Error-Alert-Workflow`.
 
 ![DE Automation Workflow](assets/DE-Automation-Workflow.png)
