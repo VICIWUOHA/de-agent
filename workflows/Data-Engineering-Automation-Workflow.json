@@ -1,0 +1,1330 @@
+{
+  "name": "Data-Engineering-Automation-Workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\n\nlet text = '', user = '', ts = '', channel = '';\n\nif (input.type === 'reaction_added') {\n  text = `[Reaction] :${input.reaction}: on message in ${input.item?.channel}`;\n  user = input.user || '';\n  ts = input.item?.ts || '';\n  channel = input.item?.channel || '';\n} else {\n  text = (input.text || '').replace(/^<@[A-Z0-9]+>\\s*/i, '').trim();\n  user = input.user || '';\n  ts = input.ts || '';\n  channel = input.channel || '';\n}\n\nreturn [{ json: { text, user, ts, channel } }];"
+      },
+      "id": "4e23b01e-add2-4105-86a1-7300870c8145",
+      "name": "Normalise Trigger Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2752,
+        256
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.text }}",
+        "options": {
+          "systemMessage": "You are classifying Slack messages sent to a data engineering team channel.\n\nRespond with ONLY one of these exact values — no punctuation, no explanation, nothing else:\nAD_HOC_QUERY\nPIPELINE_REQUEST\nNOT_RELEVANT\n\nRules:\n- AD_HOC_QUERY: someone needs data pulled, a metric checked, or a one-off report run now.\n- PIPELINE_REQUEST: the request implies a recurring report, a Jasper report, a dbt model, an Airflow DAG, or any scheduled/automated data delivery.\n- NOT_RELEVANT: casual conversation, thank-yous, announcements, or anything unrelated to data work."
+        }
+      },
+      "id": "1f151fba-982a-47c1-9ac8-42161d259f83",
+      "name": "AI: Classify Message",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 1.6,
+      "position": [
+        -2528,
+        256
+      ]
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "claude-sonnet-4-6",
+          "mode": "list",
+          "cachedResultName": "Claude Sonnet 4.6"
+        },
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+      "typeVersion": 1.3,
+      "position": [
+        -2656,
+        496
+      ],
+      "id": "c28240ab-4344-4a19-94a3-62c811ccb87d",
+      "name": "Anthropic Chat Model: Classifier",
+      "credentials": {
+        "anthropicApi": {
+          "id": "YOUR_ANTHROPIC_CREDENTIAL_ID",
+          "name": "Anthropic ENG Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.output.trim() }}",
+                    "rightValue": "AD_HOC_QUERY",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and",
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                }
+              },
+              "renameOutput": true,
+              "outputKey": "ad_hoc"
+            },
+            {
+              "conditions": {
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.output.trim() }}",
+                    "rightValue": "PIPELINE_REQUEST",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and",
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                }
+              },
+              "renameOutput": true,
+              "outputKey": "pipeline"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "none"
+        }
+      },
+      "id": "0488bc80-d84c-49b9-84d1-4ab2bf262dd4",
+      "name": "Route: 3-way Classification",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        -2288,
+        256
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $('Normalise Trigger Payload').first().json.text }}",
+        "hasOutputParser": true,
+        "options": {
+          "systemMessage": "You are a senior data engineering assistant with direct access to ClickHouse via MCP tools.\n\nYou have access to these MCP tools:\n- list_databases: lists all available databases\n- list_tables: lists tables and their columns in a given database\n- run_select_query: executes a read-only SELECT query\n    - Use run_select_query for SELECT queries only. You can use it to preview data ONLY where in doubt of the schema. Never run DDL or DML.\n    - When previewing data with the run_select_query tool. ALWAYS add a LIMIT 1000. Never scan the full table. You can use DISTINCT or GROUP BY to preview low cardinality columns.\n\nALWAYS follow this exact order:\n1. Call list_tables for each of these allowed databases BEFORE writing any SQL:\n   - analytics\n   - product_events\n   - user_metrics\n2. Use ONLY column names and table names you actually observed from list_tables. Never guess.\n3. If the request needs tables outside those schemas, set outside_scope=true, do NOT write a query, and flag for confirmation.\n4. Write the full SQL using real schema/table/column names from step 1. Also ENSURE that your SQL SYNTAX IS CLICKHOUSE COMPATIBLE PURELY. No other special sql dialect. Multi-statement queries are not allowed.\n\nRespond ONLY in this JSON format — no prose, no markdown fences:\n{\n  \"summary\": \"one sentence summary of the request\",\n  \"tables_needed\": [\"schema.table1\", \"schema.table2\"],\n  \"outside_scope\": false,\n  \"proposed_query\": \"SELECT ...\",\n  \"output_format\": \"table | csv | summary\",\n  \"confidence\": \"high | medium | low\",\n  \"note\": \"optional — include ONLY when outside_scope is true or the databases/tables are empty. Explain what is missing, what you checked, and what clarification you need from the requester. This field should default to JUST an empty string when you have a valid query.\"\n}\n"
+        }
+      },
+      "id": "279ed3d0-cd4a-4ddc-8188-f820f6b9981d",
+      "name": "AI Agent: Plan Ad-hoc Query",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 1.6,
+      "position": [
+        -2016,
+        128
+      ],
+      "retryOnFail": true
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "list",
+          "value": "claude-sonnet-4-5-20250929",
+          "cachedResultName": "Claude Sonnet 4.5"
+        },
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+      "typeVersion": 1.3,
+      "position": [
+        -2096,
+        272
+      ],
+      "id": "c56c0e27-4ba9-4d57-89af-d087db065993",
+      "name": "Anthropic Chat Model",
+      "credentials": {
+        "anthropicApi": {
+          "id": "YOUR_ANTHROPIC_CREDENTIAL_ID",
+          "name": "Anthropic ENG Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "endpointUrl": "http://mcp:8000/mcp",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.mcpClientTool",
+      "typeVersion": 1.2,
+      "position": [
+        -1904,
+        320
+      ],
+      "id": "e28f05da-a171-4fdd-88ac-a7d58c2d4ab2",
+      "name": "Clickhouse MCP"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $('Normalise Trigger Payload').first().json.text }}",
+        "options": {
+          "systemMessage": "You are a senior data engineering assistant planning a data pipeline request.\n\nThe request has already been classified as a PIPELINE_REQUEST (recurring report, Jasper report, dbt model, or Airflow DAG).\n\nYour job:\n1. Summarise what is being asked in one sentence.\n2. Identify the likely ClickHouse tables needed (from ONLY THE FOLLOWING schemas: analytics, product_events, user_metrics).\n3. Identify the pipeline type: Jasper Report | dbt Model | Airflow DAG | Other.\n4. Write the foundational SQL query that would power it.\n5. Note any scheduling or delivery requirements mentioned.\n\nRespond ONLY in this JSON format — no prose, no markdown fences:\n{\n  \"summary\": \"one sentence summary\",\n  \"pipeline_type\": \"Jasper Report | dbt Model | Airflow DAG | Other\",\n  \"tables_needed\": [\"schema.table1\", \"schema.table2\"],\n  \"outside_scope\": false,\n  \"proposed_query\": \"SELECT ...\",\n  \"scheduling_notes\": \"e.g. daily at 8am, on-demand, etc.\",\n  \"confidence\": \"high | medium | low\"\n}"
+        }
+      },
+      "id": "87ee2550-5de8-4c81-a7c8-5abfc1616725",
+      "name": "AI Agent: Plan Pipeline",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 1.6,
+      "position": [
+        -2064,
+        464
+      ],
+      "retryOnFail": true
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "list",
+          "value": "claude-sonnet-4-5-20250929",
+          "cachedResultName": "Claude Sonnet 4.5"
+        },
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+      "typeVersion": 1.3,
+      "position": [
+        -2176,
+        640
+      ],
+      "id": "2067c04c-ad48-47f1-b23f-1e03c4fa6dcd",
+      "name": "Anthropic Chat Model: Pipeline",
+      "credentials": {
+        "anthropicApi": {
+          "id": "YOUR_ANTHROPIC_CREDENTIAL_ID",
+          "name": "Anthropic ENG Account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const plan = $input.first().json.output;\nconst trigger = $('Normalise Trigger Payload').first().json;\nreturn [{ json: { ...plan, classification: 'AD_HOC_QUERY', original_message: trigger.text, slack_user: trigger.user, slack_ts: trigger.ts, slack_channel: trigger.channel } }];\n"
+      },
+      "id": "d85fd84c-6b49-4e34-926f-09215b619ce6",
+      "name": "Parse Ad-hoc Plan JSON",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1712,
+        112
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $input.first().json.output || $input.first().json.text || '';\nlet plan = {};\ntry {\n  const match = raw.match(/\\{[\\s\\S]*\\}/);\n  plan = match ? JSON.parse(match[0]) : {};\n} catch(e) {\n  plan = { summary: 'Could not parse AI response', raw_output: raw };\n}\nconst trigger = $('Normalise Trigger Payload').first().json;\nreturn [{ json: { ...plan, classification: 'PIPELINE_REQUEST', original_message: trigger.text, slack_user: trigger.user, slack_ts: trigger.ts, slack_channel: trigger.channel } }];"
+      },
+      "id": "3fd71898-6118-45f1-ab03-fd1df889ea99",
+      "name": "Parse Pipeline Plan JSON",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1712,
+        464
+      ]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "YOUR_DE_OPS_CHANNEL_ID",
+          "mode": "list",
+          "cachedResultName": "de-ops"
+        },
+        "messageType": "block",
+        "blocksUi": "={\n\t\"blocks\": [\n\t\t{\n\t\t\t\"type\": \"header\",\n\t\t\t\"text\": {\n\t\t\t\t\"type\": \"plain_text\",\n\t\t\t\t\"text\": \"🤖 New Ad-hoc Data Request — Awaiting Your Approval\",\n\t\t\t\t\"emoji\": true\n\t\t\t}\n\t\t},\n\t\t{\n\t\t\t\"type\": \"section\",\n\t\t\t\"fields\": [\n\t\t\t\t{\n\t\t\t\t\t\"type\": \"mrkdwn\",\n\t\t\t\t\t\"text\": \"*From:* <@{{ $json.slack_user }}>\"\n\t\t\t\t},\n\t\t\t\t{\n\t\t\t\t\t\"type\": \"mrkdwn\",\n\t\t\t\t\t\"text\": \"*Original message:* {{ $json.original_message }}\"\n\t\t\t\t}\n\t\t\t]\n\t\t},\n\t\t{\n\t\t\t\"type\": \"section\",\n\t\t\t\"fields\": [\n\t\t\t\t{\n\t\t\t\t\t\"type\": \"mrkdwn\",\n\t\t\t\t\t\"text\": \"*Summary:* {{$json.summary}}\"\n\t\t\t\t},\n\t\t\t\t{\n\t\t\t\t\t\"type\": \"mrkdwn\",\n\t\t\t\t\t\"text\": \"*Confidence:* {{ $json.confidence }}\"\n\t\t\t\t}\n\t\t\t]\n\t\t},\n\t\t{\n\t\t\t\"type\": \"section\",\n\t\t\t\"text\": {\n\t\t\t\t\"type\": \"mrkdwn\",\n\t\t\t\t\"text\": \"*Tables:*\\n{{ $json.tables_needed }}\\n\"\n\t\t\t}\n\t\t},\n\t\t{\n\t\t\t\"type\": \"section\",\n\t\t\t\"text\": {\n\t\t\t\t\"type\": \"mrkdwn\",\n\t\t\t\t\"text\": \"*Proposed SQL:*\\\\n```sql\\\\n{{ $json.proposed_query.replace(/\\n/g, '\\\\n') }}\\\\n```\"\n\t\t\t}\n\t\t},\n\t\t{\n\t\t\t\"type\": \"divider\"\n\t\t},\n\t\t{\n\t\t\t\"type\": \"actions\",\n\t\t\t\"elements\": [\n\t\t\t\t{\n\t\t\t\t\t\"type\": \"button\",\n\t\t\t\t\t\"text\": {\n\t\t\t\t\t\t\"type\": \"plain_text\",\n\t\t\t\t\t\t\"text\": \"✅ Approve\",\n\t\t\t\t\t\t\"emoji\": true\n\t\t\t\t\t},\n\t\t\t\t\t\"style\": \"primary\",\n\t\t\t\t\t\"action_id\": \"approve_as_is\",\n\t\t\t\t\t\"value\": \"{{ $execution.resumeUrl }}\"\n\t\t\t\t},\n\t\t\t\t{\n\t\t\t\t\t\"type\": \"button\",\n\t\t\t\t\t\"text\": {\n\t\t\t\t\t\t\"type\": \"plain_text\",\n\t\t\t\t\t\t\"text\": \"✏️ Edit SQL\",\n\t\t\t\t\t\t\"emoji\": true\n\t\t\t\t\t},\n\t\t\t\t\t\"action_id\": \"approve_modify\",\n\t\t\t\t\t\"value\": \"{{ $execution.resumeUrl }}\"\n\t\t\t\t},\n\t\t\t\t{\n\t\t\t\t\t\"type\": \"button\",\n\t\t\t\t\t\"text\": {\n\t\t\t\t\t\t\"type\": \"plain_text\",\n\t\t\t\t\t\t\"text\": \"❌ Decline\",\n\t\t\t\t\t\t\"emoji\": true\n\t\t\t\t\t},\n\t\t\t\t\t\"style\": \"danger\",\n\t\t\t\t\t\"action_id\": \"decline\",\n\t\t\t\t\t\"value\": \"{{ $execution.resumeUrl }}\"\n\t\t\t\t}\n\t\t\t]\n\t\t},\n\t\t{\n\t\t\t\"type\": \"context\",\n\t\t\t\"elements\": [\n\t\t\t\t{\n\t\t\t\t\t\"type\": \"mrkdwn\",\n\t\t\t\t\t\"text\": \"Request ID: `{{ $execution.id }}` · Times out in 30 minutes\"\n\t\t\t\t}\n\t\t\t]\n\t\t}\n\t]\n}",
+        "text": "=",
+        "otherOptions": {
+          "unfurl_links": false
+        }
+      },
+      "id": "f5a959f4-9937-44aa-b795-0a3f10c1997a",
+      "name": "Slack: Post Plan to #de-ops",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [
+        -1504,
+        112
+      ],
+      "webhookId": "9d43911d-f0a4-4b98-9ff4-466c40ef9930",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "slackApi": {
+          "id": "YOUR_SLACK_CREDENTIAL_ID",
+          "name": "Slack Personal"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "YOUR_DE_OPS_CHANNEL_ID",
+          "mode": "list",
+          "cachedResultName": "de-ops"
+        },
+        "text": "=🔧 *New Pipeline Request — Handoff Plan*\n\n*From:* <@{{ $json.slack_user }}>\n*Summary:* {{ $json.summary }}\n*Pipeline type:* {{ $json.pipeline_type }}\n\n---\n*Suggested tables:*\n{{ $json.tables_needed.join('\\n') }}\n\n*Confidence:* {{ $json.confidence }}\n\n*Scheduling / delivery notes:* {{ $json.scheduling_notes }}\n\n*Foundational query to embed in {{ $json.pipeline_type }}:*\n```{{ $json.proposed_query }}```\n\n_Handoff only — no auto-execution. A Jira ticket has been created._",
+        "otherOptions": {}
+      },
+      "id": "f924d977-b537-44a7-9de3-e7c44790271c",
+      "name": "Slack: Post Pipeline Handoff",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [
+        -1472,
+        464
+      ],
+      "webhookId": "7f8641eb-61a2-4c88-a023-fd19c56aaff7",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "slackApi": {
+          "id": "YOUR_SLACK_CREDENTIAL_ID",
+          "name": "Slack Personal"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "project": "DE",
+        "issueType": "Task",
+        "summary": "=[Pipeline] {{ $('Parse Pipeline Plan JSON').first().json.summary }}",
+        "additionalFields": {
+          "description": {
+            "type": "doc",
+            "version": 1,
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "=Requested by: {{ $('Parse Pipeline Plan JSON').first().json.slack_user }}\n\nOriginal request:\n{{ $('Parse Pipeline Plan JSON').first().json.original_message }}\n\nPipeline type: {{ $('Parse Pipeline Plan JSON').first().json.pipeline_type }}\n\nScheduling notes: {{ $('Parse Pipeline Plan JSON').first().json.scheduling_notes }}\n\nSuggested tables:\n{{ $('Parse Pipeline Plan JSON').first().json.tables_needed.join(', ') }}\n\nFoundational query:\n{{ $('Parse Pipeline Plan JSON').first().json.proposed_query }}"
+                  }
+                ]
+              }
+            ]
+          },
+          "labels": [
+            "data-pipeline",
+            "de-agent"
+          ],
+          "priority": "Medium"
+        }
+      },
+      "id": "fe578ce6-5a1f-4378-850e-887c63601d1b",
+      "name": "Jira: Create Pipeline Ticket",
+      "type": "n8n-nodes-base.jira",
+      "typeVersion": 1,
+      "position": [
+        -1232,
+        464
+      ],
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "de-agent-approval",
+        "options": {
+          "noResponseBody": true
+        }
+      },
+      "id": "01525f46-a5e8-4d17-a241-e08f3db1ccfa",
+      "name": "Webhook: Approval Response",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -1216,
+        -144
+      ],
+      "webhookId": "de-agent-approval"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body;\nconst action = body.action;\nconst sql = body.sql || '';\nreturn [{ json: { action, sql } }];\n"
+      },
+      "id": "49d64852-0e80-4652-a004-4ae6f93d59cc",
+      "name": "Parse Approval Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1072,
+        112
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.action }}",
+              "rightValue": "decline",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              },
+              "id": "704cc205-d1e5-4a8a-95d3-e18dd78717ce"
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "26fb718e-7604-4d1c-b3da-83d20fa7e5e2",
+      "name": "Approved or Declined?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -880,
+        112
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'http://' + $env.CLICKHOUSE_HOST + ':' + $env.CLICKHOUSE_PORT + '/?default_format=JSONCompact' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-ClickHouse-User",
+              "value": "={{ $env.CLICKHOUSE_USER }}"
+            },
+            {
+              "name": "X-ClickHouse-Key",
+              "value": "={{ $env.CLICKHOUSE_PASSWORD }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "text/plain"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "text/plain",
+        "body": "={{ $json.sql || $('Parse Ad-hoc Plan JSON').first().json.proposed_query }}",
+        "options": {}
+      },
+      "id": "c841f462-5e2a-48aa-84d4-1156d7098512",
+      "name": "ClickHouse: Execute Query",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -592,
+        96
+      ],
+      "retryOnFail": true,
+      "maxTries": 2
+    },
+    {
+      "parameters": {
+        "jsCode": "const chResponse = $input.first().json;\nconst plan = $('Parse Ad-hoc Plan JSON').first().json;\nconst format = plan.output_format || 'table';\nlet formatted = '';\n\ntry {\n  if (chResponse.data && chResponse.meta) {\n    const cols = chResponse.meta.map(m => m.name);\n    const rows = chResponse.data;\n\n    if (format === 'csv') {\n      formatted = [cols.join(','), ...rows.map(r => r.join(','))].join('\\n');\n    } else {\n      const widths = cols.map((col, i) =>\n        Math.max(col.length, ...rows.map(r => String(r[i] ?? '').length))\n      );\n      const pad = (val, w) => String(val ?? '').padEnd(w);\n      const header = cols.map((c, i) => pad(c, widths[i])).join('  ');\n      const sep   = widths.map(w => '-'.repeat(w)).join('  ');\n      const body  = rows.map(r => r.map((v, i) => pad(v, widths[i])).join('  ')).join('\\n');\n      formatted = `${header}\\n${sep}\\n${body}`;\n    }\n  } else {\n    formatted = JSON.stringify(chResponse, null, 2);\n  }\n} catch(e) {\n  formatted = JSON.stringify(chResponse, null, 2);\n}\n\nconst rowCount = chResponse.rows || chResponse.data?.length || 0;\nreturn [{ json: {\n  formatted, rowCount, format, plan,\n  rawData: chResponse.data || [],\n  rawMeta: chResponse.meta || []\n} }];"
+      },
+      "id": "672079c9-7e72-4acd-8373-05ed0cb5cd6e",
+      "name": "Format Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -352,
+        96
+      ],
+      "retryOnFail": true
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "YOUR_DE_OPS_CHANNEL_ID",
+          "mode": "list",
+          "cachedResultName": "de-ops"
+        },
+        "text": "=✅ *Query Results Ready*\n\n*Request:* {{ $json.plan.summary }}\n*Rows returned:* {{ $json.rowCount }}\n*Format:* {{ $json.format }}\n\n```{{ $json.formatted.substring(0, 2800) }}{{ $json.formatted.length > 2800 ? '\\n... (truncated — full results in thread)' : '' }}```\n\n_Forward to requester when ready, or reply here to ask me to refine._",
+        "otherOptions": {}
+      },
+      "id": "9f3854af-ec1f-4a3f-84a0-99258b03d4ec",
+      "name": "Slack: Post Results to #de-ops",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [
+        -112,
+        96
+      ],
+      "webhookId": "0d7f97d8-de2b-46b8-bcc7-3bde6ef454c3",
+      "retryOnFail": true,
+      "credentials": {
+        "slackApi": {
+          "id": "YOUR_SLACK_CREDENTIAL_ID",
+          "name": "Slack Personal"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "YOUR_DE_OPS_CHANNEL_ID",
+          "mode": "list",
+          "cachedResultName": "de-ops"
+        },
+        "text": "=❌ *Request Declined — Jira backlog ticket created*\n\n*Summary:* {{ $('Parse Ad-hoc Plan JSON').first().json.summary }}\n\nRequest deferred. A Jira backlog ticket has been created so nothing is lost.",
+        "otherOptions": {}
+      },
+      "id": "fe0308fc-1707-4775-8b65-f9baf076839b",
+      "name": "Slack: Post Declined Notice",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [
+        -576,
+        288
+      ],
+      "webhookId": "e171e4f5-ca0a-4e08-8253-888e547d953d",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "slackApi": {
+          "id": "YOUR_SLACK_CREDENTIAL_ID",
+          "name": "Slack Personal"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "project": "DE",
+        "issueType": "Task",
+        "summary": "=[Deferred] {{ $('Parse Ad-hoc Plan JSON').first().json.summary }}",
+        "additionalFields": {
+          "description": {
+            "type": "doc",
+            "version": 1,
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "=Requested by: {{ $('Parse Ad-hoc Plan JSON').first().json.slack_user }}\n\nOriginal request:\n{{ $('Parse Ad-hoc Plan JSON').first().json.original_message }}\n\nAI plan at time of deferral:\n{{ $('Parse Ad-hoc Plan JSON').first().json.proposed_query }}\n\nTables identified:\n{{ $('Parse Ad-hoc Plan JSON').first().json.tables_needed.join(', ') }}\n\nStatus: Declined by DE — pick up manually when capacity allows."
+                  }
+                ]
+              }
+            ]
+          },
+          "labels": [
+            "deferred",
+            "de-agent"
+          ],
+          "priority": "Low"
+        }
+      },
+      "id": "07391af8-b7de-42ae-9ef3-11dcadb05230",
+      "name": "Jira: Create Backlog Ticket",
+      "type": "n8n-nodes-base.jira",
+      "typeVersion": 1,
+      "position": [
+        -48,
+        304
+      ],
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "jsonSchemaExample": "{\n  \"summary\": \"one sentence summary of the request\",\n  \"tables_needed\": [\"schema.table1\", \"schema.table2\"],\n  \"outside_scope\": false,\n  \"proposed_query\": \"SELECT ...\",\n  \"output_format\": \"table | csv | summary\",\n  \"confidence\": \"high | medium | low\",\n  \"note\": \"optional — include ONLY when outside_scope is true or the databases/tables are empty. Explain what is missing, what you checked, and what clarification you need from the requester. This field should default to JUST an empty string when you have a valid query.\"\n}"
+      },
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.3,
+      "position": [
+        -1744,
+        320
+      ],
+      "id": "af5a4da2-d2b8-4d6c-b251-049cd55bd532",
+      "name": "Structured Output Parser"
+    },
+    {
+      "parameters": {
+        "resume": "webhook",
+        "httpMethod": "POST",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        -1280,
+        112
+      ],
+      "id": "d82b846b-d872-45be-a97b-f09722715fc4",
+      "name": "Wait",
+      "webhookId": "bd055b35-f5b5-498e-a19f-ec9350ecea18"
+    },
+    {
+      "parameters": {
+        "trigger": [
+          "message",
+          "app_mention"
+        ],
+        "channelId": {
+          "__rl": true,
+          "value": "YOUR_DATA_REQUESTS_CHANNEL_ID",
+          "mode": "list",
+          "cachedResultName": "data-requests"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.slackTrigger",
+      "typeVersion": 1,
+      "position": [
+        -2992,
+        256
+      ],
+      "id": "fe80147d-dd13-445d-817d-decde5ae1370",
+      "name": "Slack Trigger New Request Message",
+      "webhookId": "99c4aa26-982a-4951-867f-4027d010b469",
+      "credentials": {
+        "slackApi": {
+          "id": "YOUR_SLACK_CREDENTIAL_ID",
+          "name": "Slack Personal"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "conditions": [
+                  {
+                    "leftValue": "={{ JSON.parse($json.body.payload).type }}",
+                    "rightValue": "block_actions",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and",
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                }
+              },
+              "renameOutput": true,
+              "outputKey": "block_actions"
+            },
+            {
+              "conditions": {
+                "conditions": [
+                  {
+                    "leftValue": "={{ JSON.parse($json.body.payload).type }}",
+                    "rightValue": "view_submission",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and",
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                }
+              },
+              "renameOutput": true,
+              "outputKey": "view_submission"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "none"
+        }
+      },
+      "id": "b3d97ce1-c311-46b6-a82d-08f40c270fb1",
+      "name": "Route: Interaction Type",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        -928,
+        -144
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const payload = JSON.parse($input.first().json.body.payload);\nconst action = payload.actions[0];\nconst actionId = action.action_id;\nconst resumeUrl = action.value;\nreturn [{ json: { actionId, resumeUrl, sql: '', trigger_id: payload.trigger_id } }];\n"
+      },
+      "id": "7577786a-9975-4545-8e26-fef0b1a1aac3",
+      "name": "Parse Button Click",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -608,
+        -224
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.actionId }}",
+                    "rightValue": "approve_as_is",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and",
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                }
+              },
+              "renameOutput": true,
+              "outputKey": "approve_as_is"
+            },
+            {
+              "conditions": {
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.actionId }}",
+                    "rightValue": "approve_modify",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and",
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                }
+              },
+              "renameOutput": true,
+              "outputKey": "approve_modify"
+            },
+            {
+              "conditions": {
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.actionId }}",
+                    "rightValue": "decline",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and",
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                }
+              },
+              "renameOutput": true,
+              "outputKey": "decline"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "none"
+        }
+      },
+      "id": "19c0c3c3-a63c-4adf-9b20-bf3ec93391e2",
+      "name": "Route: Button Action",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        -352,
+        -256
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.resumeUrl }}",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "action",
+              "value": "approve"
+            },
+            {
+              "name": "sql",
+              "value": "={{ $json.sql }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "ced9f831-b1e8-4fa0-ad82-33e42c24bb9e",
+      "name": "HTTP: Resume Wait — Approve",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        32,
+        -400
+      ],
+      "retryOnFail": true,
+      "maxTries": 2
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.resumeUrl }}",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "action",
+              "value": "decline"
+            },
+            {
+              "name": "sql"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "6518cbc3-060f-44f1-b8b0-afeb67d079df",
+      "name": "HTTP: Resume Wait — Decline",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        80,
+        -64
+      ],
+      "retryOnFail": true,
+      "maxTries": 2
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://slack.com/api/views.open",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.SLACK_BOT_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ trigger_id: $json.trigger_id, view: { type: 'modal', callback_id: 'approve_modify_modal', private_metadata: $json.resumeUrl, title: { type: 'plain_text', text: 'Edit SQL' }, submit: { type: 'plain_text', text: 'Approve' }, close: { type: 'plain_text', text: 'Cancel' }, blocks: [{ type: 'input', block_id: 'sql_block', label: { type: 'plain_text', text: 'SQL Query' }, element: { type: 'plain_text_input', action_id: 'sql_input', multiline: true, initial_value: $json.sql || '' } }] } }) }}",
+        "options": {}
+      },
+      "id": "1d369872-a89c-4bb1-b722-1731781e5f3e",
+      "name": "HTTP: Open Edit Modal",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        48,
+        -240
+      ],
+      "retryOnFail": true,
+      "maxTries": 2
+    },
+    {
+      "parameters": {
+        "jsCode": "const payload = JSON.parse($input.first().json.body.payload);\nconst resumeUrl = payload.view.private_metadata;\nconst sql = payload.view.state.values.sql_block.sql_input.value;\nreturn [{ json: { resumeUrl, sql } }];"
+      },
+      "id": "e9a5b013-9a64-4378-8fed-9699cca8a0d1",
+      "name": "Parse Modal Submission",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -592,
+        -64
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.resumeUrl }}",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "action",
+              "value": "approve"
+            },
+            {
+              "name": "sql",
+              "value": "={{ $json.sql }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "3596aeee-d533-4317-bb97-24f1af9458e6",
+      "name": "HTTP: Resume Wait — Modified SQL",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -336,
+        -64
+      ],
+      "retryOnFail": true,
+      "maxTries": 2
+    },
+    {
+      "parameters": {
+        "content": "## Response Parsing Via Webhooks\n## **How this Works:** _Messages get posted to Slack, With action buttons that have resume URLs. Clicking on any of the action buttons (within the wait Window) triggers this webhook and parses the routes differently._",
+        "height": 208,
+        "width": 656
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        -1216,
+        -384
+      ],
+      "typeVersion": 1,
+      "id": "732dd234-ab88-40ab-b5a6-b52780b4d617",
+      "name": "Sticky Note"
+    },
+    {
+      "parameters": {
+        "content": "## Data Request Handling\n## **How this Works:** _Messages Posted to Slack for data engineering/analytics requests via a dedicated #data-requests are classified as Adhoc or New Pipeline/Report Deployment. Adhoc Requests are handled by AI with a human in the Loop. and answers get sent back to the requester._\n\n## _In case of Declined AI suggestions or a more detailed task that requires more work. A Jira ticket is opened_\n",
+        "height": 320,
+        "width": 656,
+        "color": 5
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        -2800,
+        -144
+      ],
+      "typeVersion": 1,
+      "id": "7315a6a2-b347-4066-9291-ea5d65b2007f",
+      "name": "Sticky Note1"
+    },
+    {
+      "parameters": {
+        "endpointUrl": "http://mcp:8000/mcp",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.mcpClientTool",
+      "typeVersion": 1.2,
+      "position": [
+        -1888,
+        656
+      ],
+      "id": "ad95a4f5-398c-49b8-8ef0-cc157d141a87",
+      "name": "Clickhouse MCP (New Deployment)"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Normalise Trigger Payload": {
+      "main": [
+        [
+          {
+            "node": "AI: Classify Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI: Classify Message": {
+      "main": [
+        [
+          {
+            "node": "Route: 3-way Classification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anthropic Chat Model: Classifier": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI: Classify Message",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route: 3-way Classification": {
+      "main": [
+        [
+          {
+            "node": "AI Agent: Plan Ad-hoc Query",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "AI Agent: Plan Pipeline",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent: Plan Ad-hoc Query": {
+      "main": [
+        [
+          {
+            "node": "Parse Ad-hoc Plan JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anthropic Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent: Plan Ad-hoc Query",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clickhouse MCP": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent: Plan Ad-hoc Query",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent: Plan Pipeline": {
+      "main": [
+        [
+          {
+            "node": "Parse Pipeline Plan JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anthropic Chat Model: Pipeline": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent: Plan Pipeline",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Ad-hoc Plan JSON": {
+      "main": [
+        [
+          {
+            "node": "Slack: Post Plan to #de-ops",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Pipeline Plan JSON": {
+      "main": [
+        [
+          {
+            "node": "Slack: Post Pipeline Handoff",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slack: Post Pipeline Handoff": {
+      "main": [
+        [
+          {
+            "node": "Jira: Create Pipeline Ticket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Approval Response": {
+      "main": [
+        [
+          {
+            "node": "Approved or Declined?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Approved or Declined?": {
+      "main": [
+        [
+          {
+            "node": "ClickHouse: Execute Query",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slack: Post Declined Notice",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slack: Post Declined Notice": {
+      "main": [
+        [
+          {
+            "node": "Jira: Create Backlog Ticket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ClickHouse: Execute Query": {
+      "main": [
+        [
+          {
+            "node": "Format Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Results": {
+      "main": [
+        [
+          {
+            "node": "Slack: Post Results to #de-ops",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Structured Output Parser": {
+      "ai_outputParser": [
+        [
+          {
+            "node": "AI Agent: Plan Ad-hoc Query",
+            "type": "ai_outputParser",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slack Trigger New Request Message": {
+      "main": [
+        [
+          {
+            "node": "Normalise Trigger Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slack: Post Plan to #de-ops": {
+      "main": [
+        [
+          {
+            "node": "Wait",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait": {
+      "main": [
+        [
+          {
+            "node": "Parse Approval Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook: Approval Response": {
+      "main": [
+        [
+          {
+            "node": "Route: Interaction Type",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route: Interaction Type": {
+      "main": [
+        [
+          {
+            "node": "Parse Button Click",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Parse Modal Submission",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Button Click": {
+      "main": [
+        [
+          {
+            "node": "Route: Button Action",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route: Button Action": {
+      "main": [
+        [
+          {
+            "node": "HTTP: Resume Wait — Approve",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HTTP: Open Edit Modal",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HTTP: Resume Wait — Decline",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Modal Submission": {
+      "main": [
+        [
+          {
+            "node": "HTTP: Resume Wait — Modified SQL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clickhouse MCP (New Deployment)": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent: Plan Pipeline",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "timeSavedMode": "dynamic",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false,
+    "errorWorkflow": "mPlfFhzv4GaVxSbN"
+  },
+  "versionId": "6262c94e-5fe3-4433-bc59-955049d93928",
+  "meta": {
+    "instanceId": "YOUR_N8N_INSTANCE_ID"
+  },
+  "id": "gGqKxdjQXaveGYal",
+  "tags": [
+    {
+      "updatedAt": "2026-05-21T15:40:14.973Z",
+      "createdAt": "2026-05-21T15:40:14.973Z",
+      "id": "YOUR_TAG_ID",
+      "name": "data-engineering"
+    }
+  ]
+}
