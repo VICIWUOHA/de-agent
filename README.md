@@ -82,7 +82,7 @@ As a Senior Data Engineer, with over 7 years of experience in the data space, I 
 
 ---
 
-## Customisation
+## Customization
 
 - **AI model** - all three AI nodes (classifier, ad-hoc query agent, pipeline planning agent) use Claude via the Anthropic credential in n8n. Swapping to OpenAI (GPT-4o, GPT-4.1, etc.) requires only changing the language model sub-node on each agent - the rest of the workflow is model-agnostic.
 - **Data warehouse** - ClickHouse is the default, but the query execution step is a plain HTTP Request node. Any warehouse that exposes an HTTP API (BigQuery, Snowflake, Redshift, DuckDB, etc.) can be substituted by updating the `ClickHouse: Execute Query` node URL, headers, and auth to match your target system. The MCP server would also need to be replaced with one that introspects your chosen warehouse's schema.
@@ -105,7 +105,7 @@ As a Senior Data Engineer, with over 7 years of experience in the data space, I 
 ### 1. Clone and configure
 
 ```bash
-git clone https://github.com/your-org/de-agent
+git clone https://github.com/VICIWUOHA/de-agent
 cd de-agent
 cp sample.env .env
 ```
@@ -228,6 +228,7 @@ These are two distinct integrations with different tool sets and auth models - t
 | Use case | Local dev, self-hosted ClickHouse | ClickHouse Cloud customers |
 
 This project uses the **local package** running as a Docker container (`mcp` service in `docker-compose.yml`). If you switch to ClickHouse Cloud and want to use its managed remote MCP instead, the `CLICKHOUSE_MCP_URL` alone is not sufficient - you will also need to update the MCP client node in n8n to handle OAuth, and the AI agent's system prompt may need updating since the Cloud remote MCP exposes different tool names than the local package.
+See [Clickhouse MCP docs](https://clickhouse.com/docs/cloud/features/ai-ml/remote-mcp) for more details.
 
 > **SSE vs HTTP Streamable transport**: The MCP specification deprecated the SSE transport (`/sse` endpoint) in 2025 and replaced it with [Streamable HTTP](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports#streamable-http) (`/mcp` endpoint). n8n added Streamable HTTP support in July 2025. This project uses the `/mcp` endpoint - do not use `/sse` for new setups.
 
