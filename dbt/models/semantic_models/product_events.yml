@@ -1,0 +1,110 @@
+version: 2
+
+models:
+  - name: fct_product_events
+    meta:
+      physical_relation: product_events.events
+    description: >
+      Product interaction events. One row represents one product event
+      performed by a user.
+
+    semantic_model:
+      enabled: true
+
+    agg_time_dimension: event_time
+
+    columns:
+
+      - name: user_id
+        description: User who generated the product event.
+        entity:
+          name: user
+          type: foreign
+
+      - name: session_id
+        description: Session in which the product event occurred.
+        entity:
+          name: session
+          type: foreign
+
+      - name: event_date
+        description: Calendar date of the event.
+        granularity: day
+        dimension:
+          type: time
+
+      - name: event_time
+        description: Timestamp when the event occurred.
+        granularity: second
+        dimension:
+          type: time
+
+      - name: event_name
+        description: Name of the product event.
+        dimension:
+          type: categorical
+
+      - name: feature
+        description: Product feature associated with the event.
+        dimension:
+          type: categorical
+
+    metrics:
+
+      - name: product_events
+        description: Total number of product events.
+        type: simple
+        agg: count
+        expr: 1
+
+      - name: active_product_users
+        description: Distinct users who generated at least one product event.
+        type: simple
+        agg: count_distinct
+        expr: user_id
+
+      - name: active_product_sessions
+        description: Distinct sessions containing product events.
+        type: simple
+        agg: count_distinct
+        expr: session_id
+
+  - name: fct_feature_usage_daily
+    meta:
+      physical_relation: product_events.feature_usage_daily
+    description: >
+      Daily pre-aggregated product feature usage statistics.
+
+    semantic_model:
+      enabled: true
+
+    agg_time_dimension: event_date
+
+    columns:
+
+      - name: event_date
+        description: Date of the feature usage aggregation.
+        granularity: day
+        dimension:
+          type: time
+
+      - name: feature
+        description: Product feature being measured.
+        dimension:
+          type: categorical
+
+    metrics:
+
+      - name: feature_unique_users
+        description: >
+          Sum of daily unique users using a feature. This is additive across
+          features but may overcount users across multiple days.
+        type: simple
+        agg: sum
+        expr: unique_users
+
+      - name: feature_usage_events
+        description: Total recorded feature events.
+        type: simple
+        agg: sum
+        expr: total_events

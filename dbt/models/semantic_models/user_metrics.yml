@@ -1,0 +1,139 @@
+version: 2
+
+models:
+  - name: dim_users
+    meta:
+      physical_relation: user_metrics.users
+    description: >
+      User dimension containing user attributes, signup information,
+      subscription plan, geography, and current active status.
+
+    semantic_model:
+      enabled: true
+
+    agg_time_dimension: signup_date
+
+    columns:
+
+      - name: user_id
+        description: Unique identifier for a user.
+        entity:
+          name: user
+          type: primary
+
+      - name: signup_date
+        description: Date the user signed up.
+        granularity: day
+        dimension:
+          type: time
+
+      - name: plan
+        description: Current subscription plan for the user.
+        dimension:
+          type: categorical
+
+      - name: country
+        description: Country associated with the user.
+        dimension:
+          type: categorical
+
+      - name: is_active
+        description: Whether the user is currently active.
+        dimension:
+          type: categorical
+
+    metrics:
+
+      - name: users
+        description: Total users.
+        type: simple
+        agg: count_distinct
+        expr: user_id
+
+      - name: active_users
+        description: Users currently marked as active.
+        type: simple
+        agg: count_distinct
+        expr: case when is_active = 1 then user_id end
+
+      - name: inactive_users
+        description: Users currently marked as inactive.
+        type: simple
+        agg: count_distinct
+        expr: case when is_active = 0 then user_id end
+
+  - name: fct_daily_signups
+    meta:
+      physical_relation: user_metrics.daily_signups
+    description: >
+      Daily pre-aggregated signup and signup-related revenue metrics by plan.
+
+    semantic_model:
+      enabled: true
+
+    agg_time_dimension: event_date
+
+    columns:
+
+      - name: event_date
+        description: Date of the signup aggregation.
+        granularity: day
+        dimension:
+          type: time
+
+      - name: plan
+        description: Subscription plan associated with the signup.
+        dimension:
+          type: categorical
+
+    metrics:
+
+      - name: signups
+        description: Total signups.
+        type: simple
+        agg: sum
+        expr: signups
+
+      - name: signup_revenue_usd
+        description: Revenue attributed to signups in USD.
+        type: simple
+        agg: sum
+        expr: revenue_usd
+
+  - name: fct_retention
+    meta:
+      physical_relation: user_metrics.retention
+    description: >
+      User retention by signup cohort and number of days since signup.
+
+    semantic_model:
+      enabled: true
+
+    agg_time_dimension: cohort_date
+
+    columns:
+
+      - name: cohort_date
+        description: Signup cohort date.
+        granularity: day
+        dimension:
+          type: time
+
+      - name: day_number
+        description: Number of days since signup.
+        dimension:
+          type: categorical
+
+    metrics:
+
+      - name: retained_users
+        description: Number of retained users for the cohort and retention day.
+        type: simple
+        agg: sum
+        expr: retained
+
+      - name: cohort_size
+        description: Number of users in the signup cohort.
+        type: simple
+        agg: max
+        expr: cohort_size
