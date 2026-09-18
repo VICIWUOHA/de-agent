@@ -1,0 +1,152 @@
+version: 2
+
+models:
+  - name: fct_conversions
+    meta:
+      physical_relation: analytics.conversions
+    description: >
+      User conversion events including signups, upgrades, and purchases.
+
+    semantic_model:
+      enabled: true
+
+    agg_time_dimension: event_time
+
+    columns:
+
+      - name: user_id
+        description: User associated with the conversion.
+        entity:
+          name: user
+          type: foreign
+
+      - name: event_date
+        description: Calendar date of the conversion.
+        granularity: day
+        dimension:
+          type: time
+
+      - name: event_time
+        description: Timestamp when the conversion occurred.
+        granularity: second
+        dimension:
+          type: time
+
+      - name: conversion_type
+        description: Type of conversion event.
+        dimension:
+          type: categorical
+
+      - name: plan
+        description: Product plan associated with the conversion.
+        dimension:
+          type: categorical
+
+      - name: campaign_id
+        description: Marketing campaign associated with the conversion.
+        dimension:
+          type: categorical
+
+    metrics:
+
+      - name: conversions
+        description: Total conversion events.
+        type: simple
+        agg: count
+        expr: 1
+
+      - name: converted_users
+        description: Distinct users with a conversion event.
+        type: simple
+        agg: count_distinct
+        expr: user_id
+
+      - name: conversion_revenue_usd
+        description: Total revenue recorded from conversion events in USD.
+        type: simple
+        agg: sum
+        expr: revenue_usd
+
+  - name: fct_page_views
+    meta:
+      physical_relation: analytics.page_views
+    description: >
+      Website page-view events. One row represents one page view by a user
+      within a session.
+
+    semantic_model:
+      enabled: true
+
+    agg_time_dimension: event_time
+
+    columns:
+
+      - name: user_id
+        description: Unique identifier for the user who viewed the page.
+        entity:
+          name: user
+          type: foreign
+
+      - name: session_id
+        description: Unique identifier for the browsing session.
+        entity:
+          name: session
+          type: primary
+
+      - name: event_date
+        description: Calendar date of the page view.
+        granularity: day
+        dimension:
+          type: time
+
+      - name: event_time
+        description: Timestamp when the page view occurred.
+        granularity: second
+        dimension:
+          type: time
+
+      - name: page_url
+        description: Page viewed.
+        dimension:
+          type: categorical
+
+      - name: referrer
+        description: Referrer that led to the page view.
+        dimension:
+          type: categorical
+
+      - name: device_type
+        description: Device category used for the page view.
+        dimension:
+          type: categorical
+
+      - name: country
+        description: Country associated with the page view.
+        dimension:
+          type: categorical
+
+    metrics:
+
+      - name: page_views
+        description: Total number of page views.
+        type: simple
+        agg: count
+        expr: 1
+
+      - name: unique_page_view_users
+        description: Number of distinct users who viewed pages.
+        type: simple
+        agg: count_distinct
+        expr: user_id
+
+      - name: total_time_on_pages_seconds
+        description: Total recorded page-view duration in seconds.
+        type: simple
+        agg: sum
+        expr: duration_seconds
+
+      - name: average_page_view_duration_seconds
+        description: Average recorded duration of a page view.
+        type: simple
+        agg: average
+        expr: duration_seconds
