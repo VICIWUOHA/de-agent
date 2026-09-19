@@ -1,0 +1,1680 @@
+{
+  "name": "Data-Engineering-Automation-Workflow-OAI",
+  "nodes": [
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\n\nlet text = '', user = '', ts = '', channel = '';\n\nif (input.type === 'reaction_added') {\n  text = `[Reaction] :${input.reaction}: on message in ${input.item?.channel}`;\n  user = input.user || '';\n  ts = input.item?.ts || '';\n  channel = input.item?.channel || '';\n} else {\n  text = (input.text || '').replace(/^<@[A-Z0-9]+>\\s*/i, '').trim();\n  user = input.user || '';\n  ts = input.ts || '';\n  channel = input.channel || '';\n}\n\nreturn [{ json: { text, user, ts, channel } }];"
+      },
+      "id": "0494cd4e-62c6-4a80-82ab-1d9101cab407",
+      "name": "Normalise Trigger Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2752,
+        256
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.text }}",
+        "options": {
+          "systemMessage": "You are classifying Slack messages sent to a data engineering team channel.\n\nRespond with ONLY one of these exact values — no punctuation, no explanation, nothing else:\nAD_HOC_QUERY\nPIPELINE_REQUEST\nNOT_RELEVANT\n\nRules:\n- AD_HOC_QUERY: someone needs data pulled, a metric checked, or a one-off report run now.\n- PIPELINE_REQUEST: the request implies a recurring report, a Jasper report, a dbt model, an Airflow DAG, or any scheduled/automated data delivery.\n- NOT_RELEVANT: casual conversation, thank-yous, announcements, or anything unrelated to data work."
+        }
+      },
+      "id": "ddf7ccaf-69e9-40a9-bcf4-3406e6e968b5",
+      "name": "AI: Classify Message",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 1.6,
+      "position": [
+        -2528,
+        256
+      ]
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "claude-sonnet-4-6",
+          "mode": "list",
+          "cachedResultName": "Claude Sonnet 4.6"
+        },
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+      "typeVersion": 1.3,
+      "position": [
+        -2704,
+        560
+      ],
+      "id": "6b67eda8-94c3-4079-a5e2-420cdf350341",
+      "name": "Anthropic Chat Model: Classifier",
+      "credentials": {
+        "anthropicApi": {
+          "id": "56RACZQGb5N48oXc",
+          "name": "Anthropic ENG Account"
+        }
+      },
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.output.trim() }}",
+                    "rightValue": "AD_HOC_QUERY",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and",
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                }
+              },
+              "renameOutput": true,
+              "outputKey": "ad_hoc"
+            },
+            {
+              "conditions": {
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.output.trim() }}",
+                    "rightValue": "PIPELINE_REQUEST",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and",
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                }
+              },
+              "renameOutput": true,
+              "outputKey": "pipeline"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "none"
+        }
+      },
+      "id": "515dcb4b-1411-4699-b8c3-9350b2b89a4a",
+      "name": "Route: 3-way Classification",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        -2288,
+        256
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $('Normalise Trigger Payload').first().json.text }}",
+        "hasOutputParser": true,
+        "options": {
+          "systemMessage": "You are a senior data engineering assistant with direct access to ClickHouse via MCP tools and dbt Semantic definitions via Postgres. \n\nYou have access to these tools:\n- get_all_dbt_semantic_schemas: Returns the complete, official dbt semantic model and metrics definitions (tables, columns, metrics, dimensions, filters).\n- run_select_query: Executes a read-only SELECT query. Use this for SELECT queries only. You can use it to preview data ONLY where in doubt of the actual underlying data. Never run DDL or DML.\n\nWhen the semantic schema identifies the relevant table and columns but does not define how a requested business value is represented, use run_select_query to inspect the actual data before writing the final SQL.\n\nFor low-cardinality categorical fields, use a DISTINCT preview with LIMIT 1000.\n\nExample:\nSELECT DISTINCT feature\nFROM product_events.events\nLIMIT 1000\n\nDo NOT call list_tables. The dbt semantic schema tool is the authoritative source for available tables and columns.\n\nDo NOT repeatedly call schema or metadata tools after the relevant table and columns have already been identified.\n\nALWAYS follow this exact order:\n1. Call get_all_dbt_semantic_schemas BEFORE writing any SQL to inspect the official metrics, valid categorical/time dimensions, filters, and exact underlying table strings.\n2. Use ONLY column names, table names, metrics, pre-defined semantic filters, and meta.physical_relation values observed in the dbt semantic schema metadata. Never infer or invent how a business feature, event, or property is represented in the data. If the requested feature/event value is not explicitly defined in the semantic metadata, use `run_select_query` tool with a LIMIT 1000 to inspect the relevant low-cardinality columns before writing the final SQL.\n3. Use meta.physical_relation as the authoritative physical ClickHouse table when generating SQL.\n4. If the request needs tables or metrics outside those defined in the schemas, set outside_scope=true, do NOT write a query, and flag for confirmation.\n5. Write the full SQL using real schema/table/column names from step 1. Ensure that your SQL syntax is strictly CLICKHOUSE COMPATIBLE. Multi-statement queries are not allowed.\n\nSpecial ClickHouse JSON Rules:\n- If a semantic definition specifies that a dimension or property is located inside a JSON string column (like `product_events.events.properties`), you MUST use ClickHouse JSON extraction functions (e.g., `JSONExtractString(properties, 'key_name')`) instead of querying it directly.\n\nRespond ONLY in this JSON format — no prose, no markdown fences:\n{\n  \"summary\": \"one sentence summary of the request\",\n  \"tables_needed\": [\"schema.table1\", \"schema.table2\"],\n  \"outside_scope\": false,\n  \"proposed_query\": \"SELECT ...\",\n  \"output_format\": \"table | csv | summary\",\n  \"confidence\": \"high | medium | low\",\n  \"note\": \"optional — include ONLY when outside_scope is true or the schemas are empty. Explain what is missing, what you checked, and what clarification you need from the requester. This field should default to JUST an empty string when you have a valid query.\"\n}\n"
+        }
+      },
+      "id": "ef40ca04-3bdc-49c2-9f5e-77fd006d370f",
+      "name": "AI Agent: Plan Ad-hoc Query",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 1.6,
+      "position": [
+        -2016,
+        128
+      ],
+      "retryOnFail": true
+    },
+    {
+      "parameters": {
+        "endpointUrl": "http://mcp:8000/mcp",
+        "include": "except",
+        "excludeTools": [
+          "list_tables"
+        ],
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.mcpClientTool",
+      "typeVersion": 1.2,
+      "position": [
+        -1904,
+        304
+      ],
+      "id": "3053a3cd-53db-4218-b34c-6d77d4c17186",
+      "name": "Clickhouse MCP"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $('Normalise Trigger Payload').first().json.text }}",
+        "options": {
+          "systemMessage": "You are a senior data engineering assistant planning a data pipeline request.\n\nThe request has already been classified as a PIPELINE_REQUEST (recurring report, Jasper report, dbt model, or Airflow DAG).\n\nYour job:\n1. Summarise what is being asked in one sentence.\n2. Identify the likely ClickHouse tables needed (from ONLY THE FOLLOWING schemas: analytics, product_events, user_metrics).\n3. Identify the pipeline type: Jasper Report | dbt Model | Airflow DAG | Other.\n4. Write the foundational SQL query that would power it.\n5. Note any scheduling or delivery requirements mentioned.\n\nRespond ONLY in this JSON format — no prose, no markdown fences:\n{\n  \"summary\": \"one sentence summary\",\n  \"pipeline_type\": \"Jasper Report | dbt Model | Airflow DAG | Other\",\n  \"tables_needed\": [\"schema.table1\", \"schema.table2\"],\n  \"outside_scope\": false,\n  \"proposed_query\": \"SELECT ...\",\n  \"scheduling_notes\": \"e.g. daily at 8am, on-demand, etc.\",\n  \"confidence\": \"high | medium | low\"\n}"
+        }
+      },
+      "id": "951a170f-2256-487f-8fae-5d7185f0a198",
+      "name": "AI Agent: Plan Pipeline",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 1.6,
+      "position": [
+        -2064,
+        512
+      ],
+      "retryOnFail": true
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "list",
+          "value": "claude-sonnet-4-5-20250929",
+          "cachedResultName": "Claude Sonnet 4.5"
+        },
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+      "typeVersion": 1.3,
+      "position": [
+        -2288,
+        656
+      ],
+      "id": "5bdd0ea6-12e9-494e-9289-870e437d8725",
+      "name": "Anthropic Chat Model: Pipeline",
+      "credentials": {
+        "anthropicApi": {
+          "id": "56RACZQGb5N48oXc",
+          "name": "Anthropic ENG Account"
+        }
+      },
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const plan = $input.first().json.output;\nconst trigger = $('Normalise Trigger Payload').first().json;\nreturn [{ json: { ...plan, classification: 'AD_HOC_QUERY', original_message: trigger.text, slack_user: trigger.user, slack_ts: trigger.ts, slack_channel: trigger.channel } }];\n"
+      },
+      "id": "9d2fbb66-c09d-4a07-86be-46bb9ac4d90c",
+      "name": "Parse Ad-hoc Plan JSON",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1712,
+        112
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $input.first().json.output || $input.first().json.text || '';\nlet plan = {};\ntry {\n  const match = raw.match(/\\{[\\s\\S]*\\}/);\n  plan = match ? JSON.parse(match[0]) : {};\n} catch(e) {\n  plan = { summary: 'Could not parse AI response', raw_output: raw };\n}\nconst trigger = $('Normalise Trigger Payload').first().json;\nreturn [{ json: { ...plan, classification: 'PIPELINE_REQUEST', original_message: trigger.text, slack_user: trigger.user, slack_ts: trigger.ts, slack_channel: trigger.channel } }];"
+      },
+      "id": "4162e700-2b8c-460e-a93e-efac87ac3b42",
+      "name": "Parse Pipeline Plan JSON",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1696,
+        512
+      ]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "C0B67GX9996",
+          "mode": "list",
+          "cachedResultName": "de-ops"
+        },
+        "messageType": "block",
+        "blocksUi": "={\n\t\"blocks\": [\n\t\t{\n\t\t\t\"type\": \"header\",\n\t\t\t\"text\": {\n\t\t\t\t\"type\": \"plain_text\",\n\t\t\t\t\"text\": \"🤖 New Ad-hoc Data Request — Awaiting Your Approval\",\n\t\t\t\t\"emoji\": true\n\t\t\t}\n\t\t},\n\t\t{\n\t\t\t\"type\": \"section\",\n\t\t\t\"fields\": [\n\t\t\t\t{\n\t\t\t\t\t\"type\": \"mrkdwn\",\n\t\t\t\t\t\"text\": \"*From:* <@{{ $json.slack_user }}>\"\n\t\t\t\t},\n\t\t\t\t{\n\t\t\t\t\t\"type\": \"mrkdwn\",\n\t\t\t\t\t\"text\": \"*Original message:* {{ $json.original_message }}\"\n\t\t\t\t}\n\t\t\t]\n\t\t},\n\t\t{\n\t\t\t\"type\": \"section\",\n\t\t\t\"fields\": [\n\t\t\t\t{\n\t\t\t\t\t\"type\": \"mrkdwn\",\n\t\t\t\t\t\"text\": \"*Summary:* {{$json.summary}}\"\n\t\t\t\t},\n\t\t\t\t{\n\t\t\t\t\t\"type\": \"mrkdwn\",\n\t\t\t\t\t\"text\": \"*Confidence:* {{ $json.confidence }}\"\n\t\t\t\t}\n\t\t\t]\n\t\t},\n\t\t{\n\t\t\t\"type\": \"section\",\n\t\t\t\"text\": {\n\t\t\t\t\"type\": \"mrkdwn\",\n\t\t\t\t\"text\": \"*Tables:*\\n{{ $json.tables_needed }}\\n\"\n\t\t\t}\n\t\t},\n\t\t{\n\t\t\t\"type\": \"section\",\n\t\t\t\"text\": {\n\t\t\t\t\"type\": \"mrkdwn\",\n\t\t\t\t\"text\": \"*Proposed SQL:*\\\\n```sql\\\\n{{ $json.proposed_query.replace(/\\n/g, '\\\\n') }}\\\\n```\"\n\t\t\t}\n\t\t},\n\t\t{\n\t\t\t\"type\": \"divider\"\n\t\t},\n\t\t{\n\t\t\t\"type\": \"actions\",\n\t\t\t\"elements\": [\n\t\t\t\t{\n\t\t\t\t\t\"type\": \"button\",\n\t\t\t\t\t\"text\": {\n\t\t\t\t\t\t\"type\": \"plain_text\",\n\t\t\t\t\t\t\"text\": \"✅ Approve\",\n\t\t\t\t\t\t\"emoji\": true\n\t\t\t\t\t},\n\t\t\t\t\t\"style\": \"primary\",\n\t\t\t\t\t\"action_id\": \"approve_as_is\",\n\t\t\t\t\t\"value\": \"{{ $execution.resumeUrl }}\"\n\t\t\t\t},\n\t\t\t\t{\n\t\t\t\t\t\"type\": \"button\",\n\t\t\t\t\t\"text\": {\n\t\t\t\t\t\t\"type\": \"plain_text\",\n\t\t\t\t\t\t\"text\": \"✏️ Edit SQL\",\n\t\t\t\t\t\t\"emoji\": true\n\t\t\t\t\t},\n\t\t\t\t\t\"action_id\": \"approve_modify\",\n\t\t\t\t\t\"value\": \"{{ $execution.resumeUrl }}\"\n\t\t\t\t},\n\t\t\t\t{\n\t\t\t\t\t\"type\": \"button\",\n\t\t\t\t\t\"text\": {\n\t\t\t\t\t\t\"type\": \"plain_text\",\n\t\t\t\t\t\t\"text\": \"❌ Decline\",\n\t\t\t\t\t\t\"emoji\": true\n\t\t\t\t\t},\n\t\t\t\t\t\"style\": \"danger\",\n\t\t\t\t\t\"action_id\": \"decline\",\n\t\t\t\t\t\"value\": \"{{ $execution.resumeUrl }}\"\n\t\t\t\t}\n\t\t\t]\n\t\t},\n\t\t{\n\t\t\t\"type\": \"context\",\n\t\t\t\"elements\": [\n\t\t\t\t{\n\t\t\t\t\t\"type\": \"mrkdwn\",\n\t\t\t\t\t\"text\": \"Request ID: `{{ $execution.id }}` · Times out in 30 minutes\"\n\t\t\t\t}\n\t\t\t]\n\t\t}\n\t]\n}",
+        "text": "=",
+        "otherOptions": {
+          "unfurl_links": false
+        }
+      },
+      "id": "70d9a9f6-44dc-4787-a82c-e6bc48119829",
+      "name": "Slack: Post Plan to #de-ops",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [
+        -1504,
+        112
+      ],
+      "webhookId": "092b2d97-e3f3-4bf2-a9b3-85f7a2ee6a4e",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "slackApi": {
+          "id": "XDgpaWBRvDZNqKBH",
+          "name": "Slack Personal"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "C0B67GX9996",
+          "mode": "list",
+          "cachedResultName": "de-ops"
+        },
+        "text": "=🔧 *New Pipeline Request — Handoff Plan*\n\n*From:* <@{{ $json.slack_user }}>\n*Summary:* {{ $json.summary }}\n*Pipeline type:* {{ $json.pipeline_type }}\n\n---\n*Suggested tables:*\n{{ $json.tables_needed.join('\\n') }}\n\n*Confidence:* {{ $json.confidence }}\n\n*Scheduling / delivery notes:* {{ $json.scheduling_notes }}\n\n*Foundational query to embed in {{ $json.pipeline_type }}:*\n```{{ $json.proposed_query }}```\n\n_Handoff only — no auto-execution. A Jira ticket has been created._",
+        "otherOptions": {}
+      },
+      "id": "f4e26481-d3e6-47d4-8794-5a8a26ac7422",
+      "name": "Slack: Post Pipeline Handoff",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [
+        -1456,
+        512
+      ],
+      "webhookId": "32ce3605-3a90-428a-9a43-aedbfe110b0e",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "slackApi": {
+          "id": "XDgpaWBRvDZNqKBH",
+          "name": "Slack Personal"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "project": "DE",
+        "issueType": "Task",
+        "summary": "=[Pipeline] {{ $('Parse Pipeline Plan JSON').first().json.summary }}",
+        "additionalFields": {
+          "description": {
+            "type": "doc",
+            "version": 1,
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "=Requested by: {{ $('Parse Pipeline Plan JSON').first().json.slack_user }}\n\nOriginal request:\n{{ $('Parse Pipeline Plan JSON').first().json.original_message }}\n\nPipeline type: {{ $('Parse Pipeline Plan JSON').first().json.pipeline_type }}\n\nScheduling notes: {{ $('Parse Pipeline Plan JSON').first().json.scheduling_notes }}\n\nSuggested tables:\n{{ $('Parse Pipeline Plan JSON').first().json.tables_needed.join(', ') }}\n\nFoundational query:\n{{ $('Parse Pipeline Plan JSON').first().json.proposed_query }}"
+                  }
+                ]
+              }
+            ]
+          },
+          "labels": [
+            "data-pipeline",
+            "de-agent"
+          ],
+          "priority": "Medium"
+        }
+      },
+      "id": "663b0d4a-0fd9-4137-acd8-2ae76db1cbc8",
+      "name": "Jira: Create Pipeline Ticket",
+      "type": "n8n-nodes-base.jira",
+      "typeVersion": 1,
+      "position": [
+        -1200,
+        512
+      ],
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "e6dcbe1e-b5e7-4621-8d1a-032ddfd9842b",
+        "options": {
+          "noResponseBody": true
+        }
+      },
+      "id": "5873b516-b2c9-4285-b6f3-4b0db8f54412",
+      "name": "Webhook: Approval Response",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -1216,
+        -144
+      ],
+      "webhookId": "e6dcbe1e-b5e7-4621-8d1a-032ddfd9842b"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body;\nconst action = body.action;\nconst sql = body.sql || '';\nreturn [{ json: { action, sql } }];\n"
+      },
+      "id": "d511ab34-ea1a-4ab5-9e8c-39e06d43fc16",
+      "name": "Parse Approval Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1072,
+        112
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.action }}",
+              "rightValue": "decline",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              },
+              "id": "704cc205-d1e5-4a8a-95d3-e18dd78717ce"
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "18e39f56-c35f-4fd9-8f76-141c0d04db6a",
+      "name": "Approved or Declined?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -880,
+        112
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'http://' + $env.CLICKHOUSE_HOST + ':' + $env.CLICKHOUSE_PORT + '/?default_format=JSONCompact' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-ClickHouse-User",
+              "value": "={{ $env.CLICKHOUSE_USER }}"
+            },
+            {
+              "name": "X-ClickHouse-Key",
+              "value": "={{ $env.CLICKHOUSE_PASSWORD }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "text/plain"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "text/plain",
+        "body": "={{ $json.sql || $('Parse Ad-hoc Plan JSON').first().json.proposed_query }}",
+        "options": {}
+      },
+      "id": "50a4b902-533b-4697-9a5d-9774171e7d5e",
+      "name": "ClickHouse: Execute Query",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -592,
+        96
+      ],
+      "retryOnFail": true,
+      "maxTries": 2
+    },
+    {
+      "parameters": {
+        "jsCode": "const chResponse = $input.first().json;\nconst plan = $('Parse Ad-hoc Plan JSON').first().json;\nconst format = plan.output_format || 'table';\nlet formatted = '';\n\ntry {\n  if (chResponse.data && chResponse.meta) {\n    const cols = chResponse.meta.map(m => m.name);\n    const rows = chResponse.data;\n\n    if (format === 'csv') {\n      formatted = [cols.join(','), ...rows.map(r => r.join(','))].join('\\n');\n    } else {\n      const widths = cols.map((col, i) =>\n        Math.max(col.length, ...rows.map(r => String(r[i] ?? '').length))\n      );\n      const pad = (val, w) => String(val ?? '').padEnd(w);\n      const header = cols.map((c, i) => pad(c, widths[i])).join('  ');\n      const sep   = widths.map(w => '-'.repeat(w)).join('  ');\n      const body  = rows.map(r => r.map((v, i) => pad(v, widths[i])).join('  ')).join('\\n');\n      formatted = `${header}\\n${sep}\\n${body}`;\n    }\n  } else {\n    formatted = JSON.stringify(chResponse, null, 2);\n  }\n} catch(e) {\n  formatted = JSON.stringify(chResponse, null, 2);\n}\n\nconst rowCount = chResponse.rows || chResponse.data?.length || 0;\nreturn [{ json: {\n  formatted, rowCount, format, plan,\n  rawData: chResponse.data || [],\n  rawMeta: chResponse.meta || []\n} }];"
+      },
+      "id": "9b8b5cac-0765-4cb3-bc27-67734344b8e0",
+      "name": "Format Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -352,
+        96
+      ],
+      "retryOnFail": true
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "C0B67GX9996",
+          "mode": "list",
+          "cachedResultName": "de-ops"
+        },
+        "text": "=✅ *Query Results Ready*\n\n*Request:* {{ $json.plan.summary }}\n*Rows returned:* {{ $json.rowCount }}\n*Format:* {{ $json.format }}\n\n```{{ $json.formatted.substring(0, 2800) }}{{ $json.formatted.length > 2800 ? '\\n... (truncated — full results in thread)' : '' }}```\n\n_Forward to requester when ready, or reply here to ask me to refine._",
+        "otherOptions": {}
+      },
+      "id": "19e8feff-7361-4431-b66d-ad884beacdb4",
+      "name": "Slack: Post Results to #de-ops",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [
+        -112,
+        96
+      ],
+      "webhookId": "7242a4da-c129-4943-bad5-f14aed094417",
+      "retryOnFail": true,
+      "credentials": {
+        "slackApi": {
+          "id": "XDgpaWBRvDZNqKBH",
+          "name": "Slack Personal"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "C0B67GX9996",
+          "mode": "list",
+          "cachedResultName": "de-ops"
+        },
+        "text": "=❌ *Request Declined — Jira backlog ticket created*\n\n*Summary:* {{ $('Parse Ad-hoc Plan JSON').first().json.summary }}\n\nRequest deferred. A Jira backlog ticket has been created so nothing is lost.",
+        "otherOptions": {}
+      },
+      "id": "37b241c2-9da3-41e5-ad9f-5cd3601fc1e1",
+      "name": "Slack: Post Declined Notice",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [
+        -576,
+        288
+      ],
+      "webhookId": "00662088-a719-4ef7-b191-08ea14ae40ff",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "slackApi": {
+          "id": "XDgpaWBRvDZNqKBH",
+          "name": "Slack Personal"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "project": "DE",
+        "issueType": "Task",
+        "summary": "=[Deferred] {{ $('Parse Ad-hoc Plan JSON').first().json.summary }}",
+        "additionalFields": {
+          "description": {
+            "type": "doc",
+            "version": 1,
+            "content": [
+              {
+                "type": "paragraph",
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "=Requested by: {{ $('Parse Ad-hoc Plan JSON').first().json.slack_user }}\n\nOriginal request:\n{{ $('Parse Ad-hoc Plan JSON').first().json.original_message }}\n\nAI plan at time of deferral:\n{{ $('Parse Ad-hoc Plan JSON').first().json.proposed_query }}\n\nTables identified:\n{{ $('Parse Ad-hoc Plan JSON').first().json.tables_needed.join(', ') }}\n\nStatus: Declined by DE — pick up manually when capacity allows."
+                  }
+                ]
+              }
+            ]
+          },
+          "labels": [
+            "deferred",
+            "de-agent"
+          ],
+          "priority": "Low"
+        }
+      },
+      "id": "91cc6990-6c44-4747-9fbb-ebf3839df33b",
+      "name": "Jira: Create Backlog Ticket",
+      "type": "n8n-nodes-base.jira",
+      "typeVersion": 1,
+      "position": [
+        -48,
+        304
+      ],
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "jsonSchemaExample": "{\n  \"summary\": \"one sentence summary of the request\",\n  \"tables_needed\": [\"schema.table1\", \"schema.table2\"],\n  \"outside_scope\": false,\n  \"proposed_query\": \"SELECT ...\",\n  \"output_format\": \"table | csv | summary\",\n  \"confidence\": \"high | medium | low\",\n  \"note\": \"optional — include ONLY when outside_scope is true or the databases/tables are empty. Explain what is missing, what you checked, and what clarification you need from the requester. This field should default to JUST an empty string when you have a valid query.\"\n}"
+      },
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.3,
+      "position": [
+        -1776,
+        320
+      ],
+      "id": "ced7f7a4-55b0-4e03-99df-dbef8ec29757",
+      "name": "Structured Output Parser"
+    },
+    {
+      "parameters": {
+        "resume": "webhook",
+        "httpMethod": "POST",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        -1280,
+        112
+      ],
+      "id": "8196dcd6-0f8c-4de6-b178-0b3dd4164542",
+      "name": "Wait",
+      "webhookId": "54448596-d68e-49b3-b23b-21437a6ec71f"
+    },
+    {
+      "parameters": {
+        "trigger": [
+          "message",
+          "app_mention"
+        ],
+        "channelId": {
+          "__rl": true,
+          "value": "C0B4VED3F54",
+          "mode": "list",
+          "cachedResultName": "data-requests"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.slackTrigger",
+      "typeVersion": 1,
+      "position": [
+        -2992,
+        256
+      ],
+      "id": "fd74d101-61cf-4bec-93d7-4486827c9b06",
+      "name": "Slack Trigger New Request Message",
+      "webhookId": "bbeba11a-4b94-43ff-80f4-24f3b34c186c",
+      "credentials": {
+        "slackApi": {
+          "id": "XDgpaWBRvDZNqKBH",
+          "name": "Slack Personal"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "conditions": [
+                  {
+                    "leftValue": "={{ JSON.parse($json.body.payload).type }}",
+                    "rightValue": "block_actions",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and",
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                }
+              },
+              "renameOutput": true,
+              "outputKey": "block_actions"
+            },
+            {
+              "conditions": {
+                "conditions": [
+                  {
+                    "leftValue": "={{ JSON.parse($json.body.payload).type }}",
+                    "rightValue": "view_submission",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and",
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                }
+              },
+              "renameOutput": true,
+              "outputKey": "view_submission"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "none"
+        }
+      },
+      "id": "4d9b9ff9-203f-4cde-bb70-17e128cc3f38",
+      "name": "Route: Interaction Type",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        -928,
+        -144
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const payload = JSON.parse($input.first().json.body.payload);\nconst action = payload.actions[0];\nconst actionId = action.action_id;\nconst resumeUrl = action.value;\nreturn [{ json: { actionId, resumeUrl, sql: '', trigger_id: payload.trigger_id } }];\n"
+      },
+      "id": "a16f4304-6c54-47d6-9458-577f71877692",
+      "name": "Parse Button Click",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -608,
+        -224
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.actionId }}",
+                    "rightValue": "approve_as_is",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and",
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                }
+              },
+              "renameOutput": true,
+              "outputKey": "approve_as_is"
+            },
+            {
+              "conditions": {
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.actionId }}",
+                    "rightValue": "approve_modify",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and",
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                }
+              },
+              "renameOutput": true,
+              "outputKey": "approve_modify"
+            },
+            {
+              "conditions": {
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.actionId }}",
+                    "rightValue": "decline",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and",
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                }
+              },
+              "renameOutput": true,
+              "outputKey": "decline"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "none"
+        }
+      },
+      "id": "4f7f6ca8-69b7-4545-9d15-e7fbe5ecf5c4",
+      "name": "Route: Button Action",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        -352,
+        -256
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.resumeUrl }}",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "action",
+              "value": "approve"
+            },
+            {
+              "name": "sql",
+              "value": "={{ $json.sql }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "d082a82d-713c-48d0-a2f5-04d6555056e2",
+      "name": "HTTP: Resume Wait — Approve",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        32,
+        -400
+      ],
+      "retryOnFail": true,
+      "maxTries": 2
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.resumeUrl }}",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "action",
+              "value": "decline"
+            },
+            {
+              "name": "sql"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "46010822-ebfc-4c8d-b70d-1a35f6266d3e",
+      "name": "HTTP: Resume Wait — Decline",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        80,
+        -64
+      ],
+      "retryOnFail": true,
+      "maxTries": 2
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://slack.com/api/views.open",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.SLACK_BOT_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ trigger_id: $json.trigger_id, view: { type: 'modal', callback_id: 'approve_modify_modal', private_metadata: $json.resumeUrl, title: { type: 'plain_text', text: 'Edit SQL' }, submit: { type: 'plain_text', text: 'Approve' }, close: { type: 'plain_text', text: 'Cancel' }, blocks: [{ type: 'input', block_id: 'sql_block', label: { type: 'plain_text', text: 'SQL Query' }, element: { type: 'plain_text_input', action_id: 'sql_input', multiline: true, initial_value: $json.sql || '' } }] } }) }}",
+        "options": {}
+      },
+      "id": "7dc5e684-1110-4b0d-9ff4-f71b454aae01",
+      "name": "HTTP: Open Edit Modal",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        48,
+        -240
+      ],
+      "retryOnFail": true,
+      "maxTries": 2
+    },
+    {
+      "parameters": {
+        "jsCode": "const payload = JSON.parse($input.first().json.body.payload);\nconst resumeUrl = payload.view.private_metadata;\nconst sql = payload.view.state.values.sql_block.sql_input.value;\nreturn [{ json: { resumeUrl, sql } }];"
+      },
+      "id": "80f3d7f7-6f47-48e4-b50f-a2d34806b17e",
+      "name": "Parse Modal Submission",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -592,
+        -64
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.resumeUrl }}",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "action",
+              "value": "approve"
+            },
+            {
+              "name": "sql",
+              "value": "={{ $json.sql }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "d38fc8c5-ce99-4754-9073-8b2c8a593b8d",
+      "name": "HTTP: Resume Wait — Modified SQL",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -336,
+        -64
+      ],
+      "retryOnFail": true,
+      "maxTries": 2
+    },
+    {
+      "parameters": {
+        "content": "## Response Parsing Via Webhooks\n## **How this Works:** _Messages get posted to Slack, With action buttons that have resume URLs. Clicking on any of the action buttons (within the wait Window) triggers this webhook and parses the routes differently._",
+        "height": 208,
+        "width": 656
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        -1216,
+        -384
+      ],
+      "typeVersion": 1,
+      "id": "eb2a6033-6e88-48a3-8128-ea6a9eba84c0",
+      "name": "Sticky Note"
+    },
+    {
+      "parameters": {
+        "content": "## Data Request Handling\n## **How this Works:** _Messages Posted to Slack for data engineering/analytics requests via a dedicated #data-requests are classified as Adhoc or New Pipeline/Report Deployment. Adhoc Requests are handled by AI with a human in the Loop. and answers get sent back to the requester._\n\n## _In case of Declined AI suggestions or a more detailed task that requires more work. A Jira ticket is opened_\n",
+        "height": 320,
+        "width": 656,
+        "color": 5
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        -2800,
+        -144
+      ],
+      "typeVersion": 1,
+      "id": "3db43fc4-7f65-4a54-876a-3f9804036cc3",
+      "name": "Sticky Note1"
+    },
+    {
+      "parameters": {
+        "endpointUrl": "http://mcp:8000/mcp",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.mcpClientTool",
+      "typeVersion": 1.2,
+      "position": [
+        -1792,
+        704
+      ],
+      "id": "f317c312-7984-4e13-bf6a-b33ed401d628",
+      "name": "Clickhouse MCP (New Deployment)"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "gpt-4.1-mini",
+          "mode": "list",
+          "cachedResultName": "gpt-4.1-mini"
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        -2576,
+        480
+      ],
+      "id": "0a16fb9c-780c-44b0-8903-5f4082f08f73",
+      "name": "OpenAI Chat Model (Chat Classifier)",
+      "credentials": {
+        "openAiApi": {
+          "id": "VPOSHmpdBrOFJudi",
+          "name": "OpenAI LLM account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "gpt-4.1-mini",
+          "mode": "list",
+          "cachedResultName": "gpt-4.1-mini"
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        -2096,
+        288
+      ],
+      "id": "be957b35-436f-4281-a37e-d04456dc3901",
+      "name": "OpenAI Chat Model (Adhoc Query Processing)",
+      "credentials": {
+        "openAiApi": {
+          "id": "VPOSHmpdBrOFJudi",
+          "name": "OpenAI LLM account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "gpt-4.1-mini",
+          "mode": "list",
+          "cachedResultName": "gpt-4.1-mini"
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        -2144,
+        688
+      ],
+      "id": "6260af0d-4faf-4676-b8c0-1e9f92ec7173",
+      "name": "OpenAI Chat Model (Pipeline Planner)",
+      "credentials": {
+        "openAiApi": {
+          "id": "VPOSHmpdBrOFJudi",
+          "name": "OpenAI LLM account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.embeddingsOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        -1568,
+        400
+      ],
+      "id": "2e6d84b1-e7fd-4a5a-8811-37b4acea6cec",
+      "name": "Embeddings OpenAI -Retrieval",
+      "credentials": {
+        "openAiApi": {
+          "id": "VPOSHmpdBrOFJudi",
+          "name": "OpenAI LLM account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "retrieve-as-tool",
+        "toolDescription": "Returns the official dbt semantic model definitions, including metrics, dimensions, columns, source tables, and aggregation logic. Use this before writing SQL.",
+        "tableName": "dbt_semantic_models",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.vectorStorePGVector",
+      "typeVersion": 1.3,
+      "position": [
+        -1632,
+        288
+      ],
+      "id": "d7f9cfc3-f8a9-485e-8752-b5291c80ec13",
+      "name": "get_all_dbt_semantic_schemas",
+      "credentials": {
+        "postgres": {
+          "id": "pwDNawubXtrDJ99i",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "deleteTable",
+        "schema": {
+          "__rl": true,
+          "mode": "list",
+          "value": "public"
+        },
+        "table": {
+          "__rl": true,
+          "value": "dbt_semantic_models",
+          "mode": "list",
+          "cachedResultName": "dbt_semantic_models"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -2848,
+        768
+      ],
+      "id": "6dd1f3d4-3454-4062-8846-74b9f6349604",
+      "name": "Delete table or rows",
+      "credentials": {
+        "postgres": {
+          "id": "pwDNawubXtrDJ99i",
+          "name": "Postgres account"
+        }
+      },
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "chunkSize": 10000,
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.textSplitterRecursiveCharacterTextSplitter",
+      "typeVersion": 1,
+      "position": [
+        -2528,
+        1152
+      ],
+      "id": "a1c2f7fb-861d-4e57-ae10-30aa72405731",
+      "name": "Split Text Into  Chunks"
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = $input.first().json;\n\nreturn Object.entries(input).map(([name, value]) => ({\n  json: {\n    name,\n    content: typeof value === 'string'\n      ? value\n      : value.yml\n  }\n}));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -3040,
+        768
+      ],
+      "id": "c285bfaa-c440-4a13-904e-9763d83d568e",
+      "name": "Expand dbt model files"
+    },
+    {
+      "parameters": {
+        "jsonMode": "expressionData",
+        "jsonData": "={{ $json.content }}",
+        "textSplittingMode": "custom",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.documentDefaultDataLoader",
+      "typeVersion": 1.1,
+      "position": [
+        -2608,
+        944
+      ],
+      "id": "ca9f4b8b-881e-4aba-b912-9211089b4fdf",
+      "name": "Default Data Loader",
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "9f0e15c5-ad51-49b7-b7b7-66ff4ecbbfff",
+              "name": "analytics.yml",
+              "value": "version: 2  models:   - name: fct_conversions     meta:       physical_relation: analytics.conversions     description: >       User conversion events including signups, upgrades, and purchases.      semantic_model:       enabled: true      agg_time_dimension: event_time      columns:        - name: user_id         description: User associated with the conversion.         entity:           name: user           type: foreign        - name: event_date         description: Calendar date of the conversion.         granularity: day         dimension:           type: time        - name: event_time         description: Timestamp when the conversion occurred.         granularity: second         dimension:           type: time        - name: conversion_type         description: Type of conversion event.         dimension:           type: categorical        - name: plan         description: Product plan associated with the conversion.         dimension:           type: categorical        - name: campaign_id         description: Marketing campaign associated with the conversion.         dimension:           type: categorical      metrics:        - name: conversions         description: Total conversion events.         type: simple         agg: count         expr: 1        - name: converted_users         description: Distinct users with a conversion event.         type: simple         agg: count_distinct         expr: user_id        - name: conversion_revenue_usd         description: Total revenue recorded from conversion events in USD.         type: simple         agg: sum         expr: revenue_usd    - name: fct_page_views     meta:       physical_relation: analytics.page_views     description: >       Website page-view events. One row represents one page view by a user       within a session.      semantic_model:       enabled: true      agg_time_dimension: event_time      columns:        - name: user_id         description: Unique identifier for the user who viewed the page.         entity:           name: user           type: foreign        - name: session_id         description: Unique identifier for the browsing session.         entity:           name: session           type: primary        - name: event_date         description: Calendar date of the page view.         granularity: day         dimension:           type: time        - name: event_time         description: Timestamp when the page view occurred.         granularity: second         dimension:           type: time        - name: page_url         description: Page viewed.         dimension:           type: categorical        - name: referrer         description: Referrer that led to the page view.         dimension:           type: categorical        - name: device_type         description: Device category used for the page view.         dimension:           type: categorical        - name: country         description: Country associated with the page view.         dimension:           type: categorical      metrics:        - name: page_views         description: Total number of page views.         type: simple         agg: count         expr: 1        - name: unique_page_view_users         description: Number of distinct users who viewed pages.         type: simple         agg: count_distinct         expr: user_id        - name: total_time_on_pages_seconds         description: Total recorded page-view duration in seconds.         type: simple         agg: sum         expr: duration_seconds        - name: average_page_view_duration_seconds         description: Average recorded duration of a page view.         type: simple         agg: average         expr: duration_seconds",
+              "type": "string"
+            },
+            {
+              "id": "2525ef31-609c-48d1-8dd9-a67246f7351f",
+              "name": "product_events.yml",
+              "value": "version: 2  models:   - name: fct_product_events     meta:       physical_relation: product_events.events     description: >       Product interaction events. One row represents one product event       performed by a user.      semantic_model:       enabled: true      agg_time_dimension: event_time      columns:        - name: user_id         description: User who generated the product event.         entity:           name: user           type: foreign        - name: session_id         description: Session in which the product event occurred.         entity:           name: session           type: foreign        - name: event_date         description: Calendar date of the event.         granularity: day         dimension:           type: time        - name: event_time         description: Timestamp when the event occurred.         granularity: second         dimension:           type: time        - name: event_name         description: Name of the product event.         dimension:           type: categorical        - name: feature         description: Product feature associated with the event.         dimension:           type: categorical      metrics:        - name: product_events         description: Total number of product events.         type: simple         agg: count         expr: 1        - name: active_product_users         description: Distinct users who generated at least one product event.         type: simple         agg: count_distinct         expr: user_id        - name: active_product_sessions         description: Distinct sessions containing product events.         type: simple         agg: count_distinct         expr: session_id    - name: fct_feature_usage_daily     meta:       physical_relation: product_events.feature_usage_daily     description: >       Daily pre-aggregated product feature usage statistics.      semantic_model:       enabled: true      agg_time_dimension: event_date      columns:        - name: event_date         description: Date of the feature usage aggregation.         granularity: day         dimension:           type: time        - name: feature         description: Product feature being measured.         dimension:           type: categorical      metrics:        - name: feature_unique_users         description: >           Sum of daily unique users using a feature. This is additive across           features but may overcount users across multiple days.         type: simple         agg: sum         expr: unique_users        - name: feature_usage_events         description: Total recorded feature events.         type: simple         agg: sum         expr: total_events",
+              "type": "string"
+            },
+            {
+              "id": "3e1f0cd4-cade-455a-9d86-1cfbd135de13",
+              "name": "user_metrics.yml",
+              "value": "version: 2  models:   - name: dim_users     meta:       physical_relation: user_metrics.users     description: >       User dimension containing user attributes, signup information,       subscription plan, geography, and current active status.      semantic_model:       enabled: true      agg_time_dimension: signup_date      columns:        - name: user_id         description: Unique identifier for a user.         entity:           name: user           type: primary        - name: signup_date         description: Date the user signed up.         granularity: day         dimension:           type: time        - name: plan         description: Current subscription plan for the user.         dimension:           type: categorical        - name: country         description: Country associated with the user.         dimension:           type: categorical        - name: is_active         description: Whether the user is currently active.         dimension:           type: categorical      metrics:        - name: users         description: Total users.         type: simple         agg: count_distinct         expr: user_id        - name: active_users         description: Users currently marked as active.         type: simple         agg: count_distinct         expr: case when is_active = 1 then user_id end        - name: inactive_users         description: Users currently marked as inactive.         type: simple         agg: count_distinct         expr: case when is_active = 0 then user_id end    - name: fct_daily_signups     meta:       physical_relation: user_metrics.daily_signups     description: >       Daily pre-aggregated signup and signup-related revenue metrics by plan.      semantic_model:       enabled: true      agg_time_dimension: event_date      columns:        - name: event_date         description: Date of the signup aggregation.         granularity: day         dimension:           type: time        - name: plan         description: Subscription plan associated with the signup.         dimension:           type: categorical      metrics:        - name: signups         description: Total signups.         type: simple         agg: sum         expr: signups        - name: signup_revenue_usd         description: Revenue attributed to signups in USD.         type: simple         agg: sum         expr: revenue_usd    - name: fct_retention     meta:       physical_relation: user_metrics.retention     description: >       User retention by signup cohort and number of days since signup.      semantic_model:       enabled: true      agg_time_dimension: cohort_date      columns:        - name: cohort_date         description: Signup cohort date.         granularity: day         dimension:           type: time        - name: day_number         description: Number of days since signup.         dimension:           type: categorical      metrics:        - name: retained_users         description: Number of retained users for the cohort and retention day.         type: simple         agg: sum         expr: retained        - name: cohort_size         description: Number of users in the signup cohort.         type: simple         agg: max         expr: cohort_size",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -3216,
+        768
+      ],
+      "id": "65529f39-6b28-462b-afd4-bce5427101ce",
+      "name": "Edit Fields"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.embeddingsOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        -2832,
+        1024
+      ],
+      "id": "b6d7fe30-c0ec-428b-822a-9f624d81784f",
+      "name": "Embeddings OpenAI",
+      "credentials": {
+        "openAiApi": {
+          "id": "VPOSHmpdBrOFJudi",
+          "name": "OpenAI LLM account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "insert",
+        "tableName": "dbt_semantic_models",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.vectorStorePGVector",
+      "typeVersion": 1.3,
+      "position": [
+        -2656,
+        768
+      ],
+      "id": "66d03ecf-0858-434d-aa48-12f4e72414d8",
+      "name": "Postgres PGVector Store",
+      "credentials": {
+        "postgres": {
+          "id": "pwDNawubXtrDJ99i",
+          "name": "Postgres account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Normalise Trigger Payload": {
+      "main": [
+        [
+          {
+            "node": "AI: Classify Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI: Classify Message": {
+      "main": [
+        [
+          {
+            "node": "Route: 3-way Classification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anthropic Chat Model: Classifier": {
+      "ai_languageModel": [
+        []
+      ]
+    },
+    "Route: 3-way Classification": {
+      "main": [
+        [
+          {
+            "node": "AI Agent: Plan Ad-hoc Query",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "AI Agent: Plan Pipeline",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent: Plan Ad-hoc Query": {
+      "main": [
+        [
+          {
+            "node": "Parse Ad-hoc Plan JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clickhouse MCP": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent: Plan Ad-hoc Query",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent: Plan Pipeline": {
+      "main": [
+        [
+          {
+            "node": "Parse Pipeline Plan JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anthropic Chat Model: Pipeline": {
+      "ai_languageModel": [
+        []
+      ]
+    },
+    "Parse Ad-hoc Plan JSON": {
+      "main": [
+        [
+          {
+            "node": "Slack: Post Plan to #de-ops",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Pipeline Plan JSON": {
+      "main": [
+        [
+          {
+            "node": "Slack: Post Pipeline Handoff",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slack: Post Pipeline Handoff": {
+      "main": [
+        [
+          {
+            "node": "Jira: Create Pipeline Ticket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Approval Response": {
+      "main": [
+        [
+          {
+            "node": "Approved or Declined?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Approved or Declined?": {
+      "main": [
+        [
+          {
+            "node": "ClickHouse: Execute Query",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slack: Post Declined Notice",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slack: Post Declined Notice": {
+      "main": [
+        [
+          {
+            "node": "Jira: Create Backlog Ticket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ClickHouse: Execute Query": {
+      "main": [
+        [
+          {
+            "node": "Format Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Results": {
+      "main": [
+        [
+          {
+            "node": "Slack: Post Results to #de-ops",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Structured Output Parser": {
+      "ai_outputParser": [
+        [
+          {
+            "node": "AI Agent: Plan Ad-hoc Query",
+            "type": "ai_outputParser",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slack Trigger New Request Message": {
+      "main": [
+        [
+          {
+            "node": "Normalise Trigger Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slack: Post Plan to #de-ops": {
+      "main": [
+        [
+          {
+            "node": "Wait",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait": {
+      "main": [
+        [
+          {
+            "node": "Parse Approval Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook: Approval Response": {
+      "main": [
+        [
+          {
+            "node": "Route: Interaction Type",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route: Interaction Type": {
+      "main": [
+        [
+          {
+            "node": "Parse Button Click",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Parse Modal Submission",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Button Click": {
+      "main": [
+        [
+          {
+            "node": "Route: Button Action",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route: Button Action": {
+      "main": [
+        [
+          {
+            "node": "HTTP: Resume Wait — Approve",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HTTP: Open Edit Modal",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HTTP: Resume Wait — Decline",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Modal Submission": {
+      "main": [
+        [
+          {
+            "node": "HTTP: Resume Wait — Modified SQL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clickhouse MCP (New Deployment)": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent: Plan Pipeline",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat Model (Chat Classifier)": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI: Classify Message",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat Model (Adhoc Query Processing)": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent: Plan Ad-hoc Query",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat Model (Pipeline Planner)": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent: Plan Pipeline",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Embeddings OpenAI -Retrieval": {
+      "ai_embedding": [
+        [
+          {
+            "node": "get_all_dbt_semantic_schemas",
+            "type": "ai_embedding",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "get_all_dbt_semantic_schemas": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent: Plan Ad-hoc Query",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Expand dbt model files": {
+      "main": [
+        [
+          {
+            "node": "Delete table or rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Text Into  Chunks": {
+      "ai_textSplitter": [
+        [
+          {
+            "node": "Default Data Loader",
+            "type": "ai_textSplitter",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Edit Fields": {
+      "main": [
+        [
+          {
+            "node": "Expand dbt model files",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Delete table or rows": {
+      "main": [
+        [
+          {
+            "node": "Postgres PGVector Store",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Default Data Loader": {
+      "ai_document": [
+        [
+          {
+            "node": "Postgres PGVector Store",
+            "type": "ai_document",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Embeddings OpenAI": {
+      "ai_embedding": [
+        [
+          {
+            "node": "Postgres PGVector Store",
+            "type": "ai_embedding",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "timeSavedMode": "dynamic",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false,
+    "errorWorkflow": "mPlfFhzv4GaVxSbN"
+  },
+  "versionId": "8ffe9ba6-b9a5-4b1c-95c8-08e9f0291361",
+  "meta": {
+    "instanceId": "6b877afced099fa562c6508aa0a21e9370ed5a7f3296c2c8916f627c361c1ea9"
+  },
+  "id": "gUp8AgSfDy0GcVlJ",
+  "tags": [
+    {
+      "updatedAt": "2026-05-21T15:40:14.973Z",
+      "createdAt": "2026-05-21T15:40:14.973Z",
+      "id": "IRO2jhiZiA8yB3vj",
+      "name": "data-engineering"
+    }
+  ]
+}
