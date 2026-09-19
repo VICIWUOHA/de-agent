@@ -1,4 +1,4 @@
-# Data Engineering Agent - n8n + ClickHouse + Slack + (Jira)
+# Data Engineering Agent - n8n + ClickHouse + Slack + Postgres Vector Store + (Jira)
 
 > Built by **[Victor Iwuoha](https://www.linkedin.com/in/viciwuoha)** - Senior Data Engineer.
 
@@ -61,6 +61,7 @@ As a Senior Data Engineer, with over 7 years of experience in the data space, I 
 | **ClickHouse** | Local analytics data warehouse ([Running in Docker](https://clickhouse.com/docs/install/docker)) |
 | **[mcp-clickhouse](https://github.com/ClickHouse/mcp-clickhouse)** | ClickHouse MCP server - schema lookup + query planning |
 | **[ngrok](https://ngrok.com)** | Exposes n8n webhooks to Slack over the public internet |
+| **Postgres + pgvector** | Vector store for dbt semantic model embeddings ([pgvector/pgvector:pg16](https://github.com/pgvector/pgvector)) |
 
 ---
 
@@ -138,25 +139,59 @@ docker exec -i de-agent-clickhouse-1 clickhouse-client \
 
 You can also preview the data generated via the Clickhouse UI at http://localhost:8123/play. You will need to enter the password used at setup for the default user.
 
-### 5. Open n8n
+### 5. Enable the pgvector extension
+
+Once the stack is running, connect to the Postgres container and enable the vector extension:
+
+```bash
+docker exec -it de-agent-postgres_meta-1 psql -U <POSTGRES_USER> -d <POSTGRES_DB>
+```
+
+Then inside the SQL shell:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS vector;
+```
+
+Type `\q` to exit.
+
+> Replace `<POSTGRES_USER>` and `<POSTGRES_DB>` with the values you set in `.env`. This only needs to be done once as the volume persists it across restarts.
+
+### 6. Open n8n
 
 Navigate to `http://localhost:5678` and log in with the credentials from your `.env`.
 
-### 6. Import the workflow
+### 7. Import the workflows
 
-In n8n: Go to **Create Workflow** → click the three dots in the top-right → **Import from file** → select `workflows/Data-Engineering-Automation-Workflow.json`.
+In n8n: Go to **Create Workflow** → click the three dots in the top-right → **Import from file**.
 
-After importing, multiple nodes will show errors until credentials and channels are updated — this is expected. Fix them in the following steps before publishing.
+Import both workflow files:
+- `workflows/Data-Engineering-Automation-Workflow.json` - the main DE agent workflow (Anthropic models)
+- `workflows/Data-Engineering-Automation-Workflow-OAI.json` - the OpenAI variant, which also includes the dbt semantic model ingestion sub-workflow
 
-Once all credentials and channels are set, **Publish the workflow** (top right — the yellow dot should turn green). Webhooks are only registered when the workflow is active.
+After importing, multiple nodes will show errors until credentials and channels are updated. This is expected. Fix them in the following steps before publishing.
 
-### 7. Configure n8n credentials
+Once all credentials and channels are set, **Publish the workflow** (top right - the yellow dot should turn green). Webhooks are only registered when the workflow is active.
+
+### 8. Configure n8n credentials
 
 In n8n: **Settings → Credentials**, add:
-- **Anthropic API** - your API key from console.anthropic.com
+- **Anthropic API** - your API key from console.anthropic.com (used by the Anthropic variant)
+- **OpenAI API** - your OpenAI API key (used for embeddings and the OAI variant agents)
 - **Slack OAuth2** - your Slack bot token
+- **Postgres** - connection to the `postgres_meta` container:
+  - Host: `postgres_meta` (Docker service name; use `localhost` if connecting from outside Docker)
+  - Port: value of `POSTGRES_PORT` from `.env`
+  - Database: value of `POSTGRES_DB`
+  - User / Password: `POSTGRES_USER` / `POSTGRES_PASSWORD`
 
-### 8. Configure your Slack app
+### 9. Seed the vector store
+
+With the Postgres credential in place, open the **OAI workflow** in n8n and manually trigger the ingestion sub-workflow (the section starting with **Edit Fields** → **Expand dbt model files** → **Postgres PGVector Store**). This embeds the dbt semantic model definitions into the `dbt_semantic_models` table so the ad-hoc query agent can retrieve them at runtime.
+
+> Re-run this sub-workflow whenever you add or update files under `dbt/models/semantic_models/`.
+
+### 10. Configure your Slack app
 
 In your Slack app settings (`api.slack.com/apps`):
 
@@ -196,6 +231,9 @@ Key variables in `.env` - all are passed to the n8n container via `docker-compos
 | `SLACK_BOT_TOKEN` | Slack bot token (used by the Edit SQL modal) |
 | `N8N_BLOCK_ENV_ACCESS_IN_NODE` | Set to `false` - allows nodes to read `$env.*` variables |
 | `N8N_DIAGNOSTICS_ENABLED` | Set to `false` to disable n8n telemetry |
+| `POSTGRES_USER` / `POSTGRES_PASSWORD` | Postgres (pgvector) credentials |
+| `POSTGRES_DB` | Postgres database name for the vector store |
+| `POSTGRES_PORT` | Host port to expose Postgres on (default `5432`) |
 
 ---
 
@@ -249,6 +287,12 @@ de-agent/
 │   └── slack/                              # Live Slack output screenshots
 ├── mcp/
 │   └── Dockerfile                          # ClickHouse MCP server image
+├── dbt/
+│   └── models/
+│       └── semantic_models/                # dbt semantic model YAML definitions
+│           ├── analytics.yml               # Conversion/revenue fact models
+│           ├── product_events.yml          # Product event models
+│           └── user_metrics.yml            # User dimension/metric models
 ├── sql/
 │   └── seed.sql                            # Sample schema + dummy data
 └── README.md
@@ -279,4 +323,4 @@ and update both Slack app URLs accordingly.
 - **Pipeline double-message fix** - investigate whether `AI Agent: Plan Pipeline` ever returns multiple output items in a single execution, causing the handoff message to be sent more than once.
 - **Jira integration** - enable the disabled Jira nodes (`Jira: Create Pipeline Ticket`, `Jira: Create Backlog Ticket`) once Jira credentials are configured in n8n.
 - **Agent memory** - attach a memory store to the AI agent nodes so they can recall similar past requests and avoid regenerating the same queries repeatedly.
-- **Knowledge base enrichment** - connect dbt model definitions, DataHub lineage notes, or a data dictionary to the agent as additional context, improving SQL accuracy and table selection for complex domains.
+- **Knowledge base enrichment** - add more dbt model definitions, DataHub lineage notes, data dictionary entries, or other domain context to the vector store to further improve the agent's SQL accuracy and table selection.
